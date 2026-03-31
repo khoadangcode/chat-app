@@ -356,6 +356,11 @@ body {
   color: var(--text-light);
 }
 
+.bot-badge {
+  background: #dbeafe;
+  color: #2563eb;
+}
+
 /* Status badge */
 .status-badge {
   display: inline-block;

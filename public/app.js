@@ -9,6 +9,7 @@ let socket = null;
 let onlineUserIds = [];
 let unreadCounts = {};
 let blockedUserIds = new Set();
+let userRoles = {}; // userId -> role
 
 // Message queue for offline/pending messages
 const pendingMessages = new Map();
@@ -443,7 +444,8 @@ function renderUserList(users) {
 
   list.innerHTML = '';
   users.forEach(user => {
-    const isOnline = onlineUserIds.includes(user.id);
+    userRoles[user.id] = user.role;
+    const isOnline = user.role === 'bot' || onlineUserIds.includes(user.id);
     const item = document.createElement('div');
     item.className = 'user-item' + (user.id === selectedUserId ? ' active' : '');
     item.dataset.userId = user.id;
@@ -453,11 +455,12 @@ function renderUserList(users) {
     const info = document.createElement('div');
     info.className = 'user-item-info';
 
-    const adminBadge = user.role === 'admin'
-      ? '<span class="role-badge admin-badge">Admin</span>'
-      : '';
+    let roleBadgeHtml = '';
+    if (user.role === 'admin') roleBadgeHtml = '<span class="role-badge admin-badge">Admin</span>';
+    else if (user.role === 'bot') roleBadgeHtml = '<span class="role-badge bot-badge">AI</span>';
+    const isBot = user.role === 'bot';
     info.innerHTML = `
-      <div class="user-item-name">${escapeHtml(user.username)} ${adminBadge}</div>
+      <div class="user-item-name">${isBot ? '🤖 ' : ''}${escapeHtml(user.username)} ${roleBadgeHtml}</div>
       <div class="user-item-preview" data-preview-for="${user.id}"></div>
     `;
 
@@ -1069,6 +1072,12 @@ function renderBlockedUsersList(users) {
 function updateBlockButton() {
   const btn = $('#block-btn');
   if (!btn || !selectedUserId) return;
+  // Hide block button for bot
+  if (userRoles[selectedUserId] === 'bot') {
+    btn.classList.add('hidden');
+    return;
+  }
+  btn.classList.remove('hidden');
   const isBlocked = blockedUserIds.has(selectedUserId);
   const textEl = btn.querySelector('.block-btn-text');
   if (textEl) {

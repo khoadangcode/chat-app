@@ -6,6 +6,7 @@ const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const Database = require('better-sqlite3');
 const path = require('path');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 const app = express();
 const server = http.createServer(app);
@@ -74,6 +75,50 @@ if (!adminExists) {
   const firstUser = db.prepare('SELECT id FROM users ORDER BY id ASC LIMIT 1').get();
   if (firstUser) {
     db.prepare("UPDATE users SET role = 'admin' WHERE id = ?").run(firstUser.id);
+  }
+}
+
+// --- AI BOT SETUP ---
+const BOT_USERNAME = 'AI Bot';
+let BOT_ID;
+
+// Create bot user if not exists
+const botUser = db.prepare("SELECT id FROM users WHERE username = ?").get(BOT_USERNAME);
+if (botUser) {
+  BOT_ID = botUser.id;
+} else {
+  const hash = bcrypt.hashSync(crypto.randomBytes(32).toString('hex'), 10);
+  const result = db.prepare("INSERT INTO users (username, password, role) VALUES (?, ?, 'bot')").run(BOT_USERNAME, hash);
+  BOT_ID = result.lastInsertRowid;
+}
+
+// Gemini AI
+let geminiModel = null;
+if (process.env.GEMINI_API_KEY) {
+  const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+  geminiModel = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+}
+
+const BOT_SYSTEM_PROMPT = `Bạn là "AI Bot", một chatbot thân thiện trong app nhắn tin. Quy tắc:
+- Trả lời bằng tiếng Việt, ngắn gọn (1-3 câu)
+- Vui vẻ, dùng emoji phù hợp
+- Nếu không biết thì nói thẳng
+- Không bao giờ giả vờ là người thật`;
+
+async function getBotReply(userMessage) {
+  if (!geminiModel) {
+    return 'Xin lỗi, AI Bot chưa được kích hoạt. Admin cần cấu hình API key! 🔑';
+  }
+  try {
+    const chat = geminiModel.startChat({
+      history: [],
+      systemInstruction: BOT_SYSTEM_PROMPT
+    });
+    const result = await chat.sendMessage(userMessage);
+    return result.response.text().slice(0, 2000);
+  } catch (err) {
+    console.error('Gemini error:', err.message);
+    return 'Ối, mình bị lỗi rồi 😵 Thử lại sau nhé!';
   }
 }
 
@@ -241,9 +286,11 @@ app.get('/api/me', (req, res) => {
 app.get('/api/users', requireAuth, (req, res) => {
   const users = db.prepare(`
     SELECT u.id, u.username, u.role FROM users u
-    WHERE u.id != ? AND u.is_banned = 0
+    WHERE u.id != ? AND u.is_banned = 0 AND u.role != 'bot'
       AND u.id NOT IN (SELECT blocked_id FROM blocked_users WHERE user_id = ?)
   `).all(req.userId, req.userId);
+  // Always add bot at the beginning
+  users.unshift({ id: BOT_ID, username: BOT_USERNAME, role: 'bot' });
   res.json(users);
 });
 
@@ -452,11 +499,35 @@ io.on('connection', (socket) => {
 
     socket.emit('new_message', message);
 
-    const receiverSockets = onlineUsers.get(receiverId);
-    if (receiverSockets) {
-      receiverSockets.forEach(sid => {
-        io.to(sid).emit('new_message', message);
+    // If sending to bot, generate AI reply
+    if (receiverId === BOT_ID) {
+      getBotReply(sanitized).then(reply => {
+        const botResult = db.prepare(
+          'INSERT INTO messages (sender_id, receiver_id, content) VALUES (?, ?, ?)'
+        ).run(BOT_ID, userId, reply);
+
+        const botMessage = {
+          id: botResult.lastInsertRowid,
+          sender_id: BOT_ID,
+          receiver_id: userId,
+          sender_name: BOT_USERNAME,
+          content: reply,
+          created_at: new Date().toISOString()
+        };
+
+        // Send bot reply to user
+        const userSockets = onlineUsers.get(userId);
+        if (userSockets) {
+          userSockets.forEach(sid => io.to(sid).emit('new_message', botMessage));
+        }
       });
+    } else {
+      const receiverSockets = onlineUsers.get(receiverId);
+      if (receiverSockets) {
+        receiverSockets.forEach(sid => {
+          io.to(sid).emit('new_message', message);
+        });
+      }
     }
   });
 
