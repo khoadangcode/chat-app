@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Chat App</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- LOGIN / REGISTER -->
+  <div id="auth-screen" class="screen">
+    <div class="auth-container">
+      <h1>Chat App</h1>
+      <p class="subtitle">Nhắn tin real-time</p>
+
+      <div class="tabs">
+        <button class="tab active" data-tab="login">Đăng nhập</button>
+        <button class="tab" data-tab="register">Đăng ký</button>
+      </div>
+
+      <form id="login-form" class="auth-form">
+        <input type="text" id="login-username" placeholder="Username" autocomplete="username" required>
+        <input type="password" id="login-password" placeholder="Password" autocomplete="current-password" required>
+        <button type="submit">Đăng nhập</button>
+      </form>
+
+      <form id="register-form" class="auth-form hidden">
+        <input type="text" id="reg-username" placeholder="Username (>= 3 ký tự)" autocomplete="username" required>
+        <input type="password" id="reg-password" placeholder="Password (>= 4 ký tự)" autocomplete="new-password" required>
+        <button type="submit">Đăng ký</button>
+      </form>
+
+      <div id="auth-error" class="error hidden"></div>
+    </div>
+  </div>
+
+  <!-- CHAT SCREEN -->
+  <div id="chat-screen" class="screen hidden">
+    <div class="chat-layout">
+
+      <!-- Sidebar -->
+      <div class="sidebar">
+        <div class="sidebar-header">
+          <div class="current-user">
+            <span class="user-avatar" id="my-avatar"></span>
+            <span id="my-username"></span>
+          </div>
+          <div class="sidebar-header-actions">
+            <button id="admin-btn" class="icon-btn hidden" title="Quản trị">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="3"/>
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+              </svg>
+            </button>
+            <button id="blocked-users-btn" class="icon-btn" title="Người dùng đã chặn">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="10"/>
+                <line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/>
+              </svg>
+            </button>
+            <button id="logout-btn" class="icon-btn" title="Đăng xuất">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+                <polyline points="16 17 21 12 16 7"/>
+                <line x1="21" y1="12" x2="9" y2="12"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        <div class="search-box">
+          <input type="text" id="search-users" placeholder="Tìm người dùng...">
+        </div>
+
+        <!-- Blocked users section (hidden by default) -->
+        <div id="blocked-users-section" class="blocked-users-section hidden">
+          <div class="blocked-users-header">
+            <h3>Người dùng đã chặn</h3>
+            <button id="close-blocked-section" class="icon-btn" title="Đóng">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="18" y1="6" x2="6" y2="18"/>
+                <line x1="6" y1="6" x2="18" y2="18"/>
+              </svg>
+            </button>
+          </div>
+          <div id="blocked-users-list" class="blocked-users-list">
+            <p class="empty-state">Chưa chặn người dùng nào</p>
+          </div>
+        </div>
+
+        <div id="user-list" class="user-list">
+          <p class="empty-state">Chưa có người dùng khác</p>
+        </div>
+      </div>
+
+      <!-- Chat area -->
+      <div class="chat-area">
+        <div id="no-chat" class="no-chat">
+          <div class="no-chat-content">
+            <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="#b0b8c1" stroke-width="1.5">
+              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+            </svg>
+            <p>Chọn một người để bắt đầu nhắn tin</p>
+          </div>
+        </div>
+
+        <div id="chat-box" class="chat-box hidden">
+          <div class="chat-header">
+            <span class="user-avatar" id="chat-avatar"></span>
+            <div class="chat-header-info">
+              <span id="chat-with-name"></span>
+              <span id="chat-status" class="status-text"></span>
+            </div>
+            <div class="chat-header-actions">
+              <button id="block-btn" title="Chặn người dùng">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <circle cx="12" cy="12" r="10"/>
+                  <line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/>
+                </svg>
+                <span class="block-btn-text">Chặn</span>
+              </button>
+            </div>
+          </div>
+
+          <div id="messages" class="messages"></div>
+
+          <div id="typing-indicator" class="typing-indicator hidden">
+            <span></span> đang nhập...
+          </div>
+
+          <form id="message-form" class="message-form">
+            <input type="text" id="message-input" placeholder="Nhập tin nhắn..." autocomplete="off" maxlength="2000">
+            <button type="submit">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+              </svg>
+            </button>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ADMIN PANEL OVERLAY -->
+  <div id="admin-panel" class="admin-panel hidden">
+    <div class="admin-panel-header">
+      <h2>Bảng quản trị</h2>
+      <button id="admin-close-btn" class="icon-btn" title="Đóng">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <line x1="18" y1="6" x2="6" y2="18"/>
+          <line x1="6" y1="6" x2="18" y2="18"/>
+        </svg>
+      </button>
+    </div>
+
+    <!-- Stats cards -->
+    <div class="admin-stats">
+      <div class="stat-card">
+        <div class="stat-value" id="stat-total-users">0</div>
+        <div class="stat-label">Tổng người dùng</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value" id="stat-banned-users">0</div>
+        <div class="stat-label">Đã cấm</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value" id="stat-messages-today">0</div>
+        <div class="stat-label">Tin nhắn hôm nay</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value" id="stat-total-messages">0</div>
+        <div class="stat-label">Tổng tin nhắn</div>
+      </div>
+    </div>
+
+    <!-- User management table -->
+    <div class="admin-table-wrap">
+      <h3>Quản lý người dùng</h3>
+      <table class="admin-table">
+        <thead>
+          <tr>
+            <th>Username</th>
+            <th>Vai trò</th>
+            <th>Trạng thái</th>
+            <th>Tin nhắn</th>
+            <th>Hành động</th>
+          </tr>
+        </thead>
+        <tbody id="admin-users-tbody"></tbody>
+      </table>
+      <p id="admin-no-users" class="empty-state hidden">Không có người dùng nào</p>
+    </div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
