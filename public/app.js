@@ -780,6 +780,7 @@ function renderEmojiGrid(searchQuery = '') {
   grid.innerHTML = '';
 
   if (searchQuery) {
+    grid.classList.add('search-mode');
     // Search mode - filter all emojis
     const allEmojis = new Set();
     Object.values(EMOJI_DATA).forEach(emojis => emojis.forEach(e => allEmojis.add(e)));
@@ -811,6 +812,7 @@ function renderEmojiGrid(searchQuery = '') {
       grid.innerHTML = '<p class="empty-state" style="padding:10px;font-size:13px;">Không tìm thấy emoji</p>';
     }
   } else {
+    grid.classList.remove('search-mode');
     // Category mode
     Object.entries(EMOJI_DATA).forEach(([category, emojis]) => {
       const header = document.createElement('div');
