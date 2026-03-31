@@ -16,6 +16,79 @@ let nextTempId = -1;
 
 const COLORS = ['#5b5ea6','#e07a5f','#3d85c6','#81b29a','#f2a65a','#e76f51','#457b9d','#8338ec'];
 
+// ---- NOTIFICATION SOUND ----
+
+const playNotifSound = (() => {
+  let ctx;
+  return () => {
+    try {
+      if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.frequency.value = 880;
+      osc.type = 'sine';
+      gain.gain.setValueAtTime(0.3, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
+      osc.start(ctx.currentTime);
+      osc.stop(ctx.currentTime + 0.3);
+    } catch {}
+  };
+})();
+
+// ---- EMOJI DATA ----
+
+const EMOJI_DATA = {
+  'Mặt cười': ['😀','😃','😄','😁','😆','😅','🤣','😂','🙂','😊','😇','🥰','😍','🤩','😘','😗','😚','😙','🥲','😋','😛','😜','🤪','😝','🤑','🤗','🤭','🤫','🤔','🫡','🤐','🤨','😐','😑','😶','🫥','😏','😒','🙄','😬','🤥','😌','😔','😪','🤤','😴','😷','🤒','🤕','🤢','🤮','🥴','😵','🤯','🥱','😎','🤓','🧐'],
+  'Cảm xúc': ['😤','😡','🤬','😈','👿','💀','☠️','💩','🤡','👻','👽','👾','🤖','😺','😸','😹','😻','😼','😽','🙀','😿','😾'],
+  'Tay & Cử chỉ': ['👋','🤚','🖐️','✋','🖖','🫱','🫲','🫳','🫴','👌','🤌','🤏','✌️','🤞','🫰','🤟','🤘','🤙','👈','👉','👆','🖕','👇','☝️','🫵','👍','👎','✊','👊','🤛','🤜','👏','🙌','🫶','👐','🤲','🙏','💪'],
+  'Trái tim': ['❤️','🧡','💛','💚','💙','💜','🖤','🤍','🤎','💔','❤️‍🔥','❤️‍🩹','💕','💞','💓','💗','💖','💘','💝','💟'],
+  'Động vật': ['🐶','🐱','🐭','🐹','🐰','🦊','🐻','🐼','🐨','🐯','🦁','🐮','🐷','🐸','🐵','🙈','🙉','🙊','🐔','🐧','🐦','🦆','🦅','🦉','🦇','🐺','🐗','🐴','🦄','🐝','🐛','🦋','🐌','🐞','🐜'],
+  'Đồ ăn': ['🍎','🍐','🍊','🍋','🍌','🍉','🍇','🍓','🫐','🍈','🍒','🍑','🥭','🍍','🥥','🥝','🍅','🥑','🍆','🌶️','🫑','🥒','🥬','🧄','🧅','🥔','🍠','🌽','🥕','🍕','🍔','🍟','🌭','🍿','🧂','🥚','🍳','🧈','🥞','🧇','🥓','🍗','🍖','🌮','🍜','🍝','🍣','🍱','🍩','🍪','🎂','🍰','🧁','🍫','🍬','🍭','🍮','🍯'],
+  'Hoạt động': ['⚽','🏀','🏈','⚾','🥎','🎾','🏐','🏉','🥏','🎱','🪀','🏓','🏸','🏑','🥍','🏏','🥅','⛳','🪁','🏹','🎣','🤿','🥊','🥋','🎽','🛹','🛼','⛸️','🥌','🎿','⛷️','🏂','🪂','🏋️','🤸','🤺','⛹️','🧗','🚴','🚵','🏇','🧘','🏄','🏊','🤽','🚣','🧑‍🚀'],
+  'Du lịch': ['🚗','🚕','🚌','🏎️','🚓','🚑','🚒','🚐','🛻','🚚','🚛','🚜','🛵','🏍️','🚲','🛴','🚆','🚇','🚈','🚂','✈️','🚀','🛸','🚁','🛶','⛵','🚤','🛥️','🛳️','🏠','🏡','🏢','🏣','🏥','🏦','🏪','🏫','🏬','🗼','🗽','⛪','🕌','🛕','🕍','⛩️','🏰','🏯','🎡','🎢','🎠','⛲','🌋','🗻','🏕️','🏖️','🌅','🌄','🌠','🎆','🎇'],
+  'Vật dụng': ['⌚','📱','💻','⌨️','🖥️','🖨️','🖱️','💾','💿','📀','📷','📹','🎥','📺','📻','🎙️','🎚️','🎛️','⏱️','⏰','🔔','🔕','📯','💡','🔦','🕯️','🪔','💰','💵','💴','💶','💷','💎','🔑','🗡️','🛡️','🔧','🔨','⛏️','🪓','🔩','🪛','🧲','🧪','🧫','🧬','🔬','🔭','📡']
+};
+
+const EMOJI_KEYWORDS = {
+  'vui': ['😀','😃','😄','😁','😆','😊','🥳','🎉'],
+  'buon': ['😢','😭','😞','😔','🥺','😿'],
+  'gian': ['😤','😡','🤬','👿','💢'],
+  'tim': ['❤️','💕','💖','💗','💓','💘','💝','🥰','😍'],
+  'yeu': ['🥰','😍','😘','💕','💖','❤️','💗','😻'],
+  'cuoi': ['😂','🤣','😆','😹','🤭','😄'],
+  'khoc': ['😢','😭','😿','🥲','😥'],
+  'so': ['😨','😱','🫣','😰','🥶','👻'],
+  'ngu': ['😴','💤','🥱','😪'],
+  'an': ['🍕','🍔','🍟','🍗','🍜','🍣','🍰','🍩','😋'],
+  'ok': ['👍','👌','✅','🆗','💯'],
+  'suy': ['🤔','🧐','💭','🫠'],
+  'chao': ['👋','🤚','✋','🖐️'],
+  'thua': ['🏆','🥇','🎉','🥳','🎊'],
+  'hoa': ['🌸','🌹','🌺','🌻','🌼','💐','🌷'],
+  'may': ['☁️','⛅','🌤️','🌥️','🌦️','🌧️','⛈️'],
+  'lua': ['🔥','🔥','🔥','❤️‍🔥','🌋'],
+  'star': ['⭐','🌟','✨','💫','🌠'],
+  'nhac': ['🎵','🎶','🎸','🎹','🥁','🎤','🎧'],
+  'xin': ['🙏','🥺','🫶','💖'],
+  'cool': ['😎','🤙','🆒','✨','💅'],
+  'meo': ['🐱','😺','😸','😹','😻','😼','😽','🙀','😿','😾'],
+  'cho': ['🐶','🐕','🦮','🐕‍🦺','🐩'],
+  'ga': ['🐔','🐓','🐣','🐤','🐥','🍗'],
+};
+
+const STICKERS = [
+  '😂','🤣','😍','🥰','😘','🤗','😎','🤩','🥳','😭',
+  '😤','🤬','😱','🤯','🥺','😇','🤡','💀','👻','👽',
+  '❤️','💔','💕','🔥','✨','💯','👍','👎','👏','🙏',
+  '💪','🤝','✌️','🤟','👋','🫶','🐶','🐱','🐼','🦄'
+];
+
+const REACTION_EMOJIS = ['❤️','😂','👍','😮','😢'];
+
+// ---- HELPERS ----
+
 function getColor(name) {
   let hash = 0;
   for (let i = 0; i < name.length; i++) hash = name.charCodeAt(i) + ((hash << 5) - hash);
@@ -260,6 +333,11 @@ function connectSocket() {
       // Otherwise show it (sent from another tab/device)
     }
 
+    // Play notification sound for messages from others
+    if (msg.sender_id !== currentUser.id) {
+      playNotifSound();
+    }
+
     if (
       (msg.sender_id === selectedUserId && msg.receiver_id === currentUser.id) ||
       (msg.sender_id === currentUser.id && msg.receiver_id === selectedUserId)
@@ -287,6 +365,12 @@ function connectSocket() {
   socket.on('error_message', (data) => {
     const msg = typeof data === 'string' ? data : (data.message || data.error || 'Có lỗi xảy ra');
     alert(msg);
+  });
+
+  // Listen for reaction updates
+  socket.on('reaction_updated', (data) => {
+    // data: { messageId, reactions: [{ emoji, user_id, username }, ...] }
+    updateMessageReactions(data.messageId, data.reactions);
   });
 }
 
@@ -490,8 +574,9 @@ async function selectUser(userId, username) {
 function appendMessage(msg, animate = true) {
   const isSent = msg.sender_id === currentUser.id;
   const isPending = !!msg.pending;
+  const isSticker = msg.content && msg.content.startsWith('[sticker]');
   const el = document.createElement('div');
-  el.className = 'message ' + (isSent ? 'sent' : 'received') + (isPending ? ' pending' : '');
+  el.className = 'message ' + (isSent ? 'sent' : 'received') + (isPending ? ' pending' : '') + (isSticker ? ' sticker-message' : '');
   el.dataset.msgId = msg.id;
   if (!animate) el.style.animation = 'none';
 
@@ -502,13 +587,388 @@ function appendMessage(msg, animate = true) {
       : '<span class="msg-status">✓</span>';
   }
 
-  el.innerHTML = `${escapeHtml(msg.content)}<span class="time">${formatTime(msg.created_at)}${status}</span>`;
+  if (isSticker) {
+    // Render sticker as large emoji without bubble
+    const stickerEmoji = msg.content.replace('[sticker]', '').trim();
+    el.innerHTML = `<span class="sticker-display">${stickerEmoji}</span><span class="time">${formatTime(msg.created_at)}${status}</span>`;
+  } else {
+    el.innerHTML = `${escapeHtml(msg.content)}<span class="time">${formatTime(msg.created_at)}${status}</span>`;
+  }
+
+  // Reaction button
+  const reactionBtn = document.createElement('button');
+  reactionBtn.className = 'reaction-add-btn';
+  reactionBtn.textContent = '+';
+  reactionBtn.title = 'Thêm reaction';
+  reactionBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    showReactionPicker(el, msg.id);
+  });
+  el.appendChild(reactionBtn);
+
+  // Reactions container
+  const reactionsContainer = document.createElement('div');
+  reactionsContainer.className = 'reactions-container';
+  reactionsContainer.dataset.reactionsFor = msg.id;
+  el.appendChild(reactionsContainer);
+
+  // Render existing reactions if any
+  if (msg.reactions && msg.reactions.length > 0) {
+    renderReactions(reactionsContainer, msg.id, msg.reactions);
+  }
+
   $('#messages').appendChild(el);
+}
+
+// ---- REACTIONS ----
+
+function showReactionPicker(messageEl, messageId) {
+  // Remove any existing picker
+  const existing = document.querySelector('.reaction-picker-popup');
+  if (existing) existing.remove();
+
+  const picker = document.createElement('div');
+  picker.className = 'reaction-picker-popup';
+
+  REACTION_EMOJIS.forEach(emoji => {
+    const btn = document.createElement('button');
+    btn.className = 'reaction-picker-emoji';
+    btn.textContent = emoji;
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggleReaction(messageId, emoji);
+      picker.remove();
+    });
+    picker.appendChild(btn);
+  });
+
+  messageEl.appendChild(picker);
+
+  // Close picker on outside click
+  const closeHandler = (e) => {
+    if (!picker.contains(e.target)) {
+      picker.remove();
+      document.removeEventListener('click', closeHandler);
+    }
+  };
+  setTimeout(() => document.addEventListener('click', closeHandler), 0);
+}
+
+function toggleReaction(messageId, emoji) {
+  if (!socket || !socket.connected) return;
+
+  // Check if user already reacted with this emoji
+  const container = document.querySelector(`[data-reactions-for="${messageId}"]`);
+  if (container) {
+    const existingBadge = container.querySelector(`[data-reaction-emoji="${emoji}"]`);
+    if (existingBadge && existingBadge.classList.contains('reacted-by-me')) {
+      socket.emit('remove_reaction', { messageId, emoji });
+      return;
+    }
+  }
+
+  socket.emit('add_reaction', { messageId, emoji });
+}
+
+function updateMessageReactions(messageId, reactions) {
+  const container = document.querySelector(`[data-reactions-for="${messageId}"]`);
+  if (!container) return;
+  renderReactions(container, messageId, reactions);
+}
+
+function renderReactions(container, messageId, reactions) {
+  container.innerHTML = '';
+  if (!reactions || reactions.length === 0) return;
+
+  // Group reactions by emoji
+  const grouped = {};
+  reactions.forEach(r => {
+    if (!grouped[r.emoji]) grouped[r.emoji] = [];
+    grouped[r.emoji].push(r);
+  });
+
+  Object.entries(grouped).forEach(([emoji, users]) => {
+    const badge = document.createElement('button');
+    badge.className = 'reaction-badge';
+    badge.dataset.reactionEmoji = emoji;
+
+    const isMine = users.some(u => u.user_id === currentUser.id);
+    if (isMine) badge.classList.add('reacted-by-me');
+
+    const names = users.map(u => u.username).join(', ');
+    badge.title = names;
+    badge.textContent = `${emoji} ${users.length}`;
+
+    badge.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggleReaction(messageId, emoji);
+    });
+
+    container.appendChild(badge);
+  });
 }
 
 function scrollToBottom(smooth = true) {
   const el = $('#messages');
   el.scrollTo({ top: el.scrollHeight, behavior: smooth ? 'smooth' : 'instant' });
+}
+
+// ---- EMOJI PICKER ----
+
+let emojiPickerOpen = false;
+let currentEmojiTab = 'emoji'; // 'emoji' or 'sticker'
+
+function initEmojiPicker() {
+  const emojiBtn = $('#emoji-btn');
+  const emojiPicker = $('#emoji-picker');
+  if (!emojiBtn || !emojiPicker) return;
+
+  emojiBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    emojiPickerOpen = !emojiPickerOpen;
+    emojiPicker.classList.toggle('hidden', !emojiPickerOpen);
+    if (emojiPickerOpen) {
+      renderEmojiPickerContent();
+      const searchInput = $('#emoji-search');
+      if (searchInput) searchInput.value = '';
+    }
+  });
+
+  // Close picker on outside click
+  document.addEventListener('click', (e) => {
+    if (emojiPickerOpen && !emojiPicker.contains(e.target) && e.target !== emojiBtn) {
+      emojiPickerOpen = false;
+      emojiPicker.classList.add('hidden');
+    }
+  });
+
+  // Tab switching
+  emojiPicker.addEventListener('click', (e) => {
+    if (e.target.classList.contains('emoji-tab')) {
+      currentEmojiTab = e.target.dataset.tab;
+      $$('.emoji-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === currentEmojiTab));
+      renderEmojiPickerContent();
+    }
+  });
+
+  // Search
+  emojiPicker.addEventListener('input', (e) => {
+    if (e.target.id === 'emoji-search') {
+      renderEmojiPickerContent(e.target.value.trim().toLowerCase());
+    }
+  });
+}
+
+function renderEmojiPickerContent(searchQuery = '') {
+  const emojiGrid = $('#emoji-grid');
+  const stickerGrid = $('#sticker-grid');
+  if (!emojiGrid || !stickerGrid) return;
+
+  if (currentEmojiTab === 'emoji') {
+    emojiGrid.classList.remove('hidden');
+    stickerGrid.classList.add('hidden');
+    renderEmojiGrid(searchQuery);
+  } else {
+    emojiGrid.classList.add('hidden');
+    stickerGrid.classList.remove('hidden');
+    renderStickerGrid();
+  }
+}
+
+function renderEmojiGrid(searchQuery = '') {
+  const grid = $('#emoji-grid');
+  grid.innerHTML = '';
+
+  if (searchQuery) {
+    // Search mode - filter all emojis
+    const allEmojis = new Set();
+    Object.values(EMOJI_DATA).forEach(emojis => emojis.forEach(e => allEmojis.add(e)));
+
+    // Also search by Vietnamese keywords
+    const matchedFromKeywords = new Set();
+    Object.entries(EMOJI_KEYWORDS).forEach(([keyword, emojis]) => {
+      if (keyword.includes(searchQuery)) {
+        emojis.forEach(e => matchedFromKeywords.add(e));
+      }
+    });
+
+    // Also search by category name
+    Object.entries(EMOJI_DATA).forEach(([category, emojis]) => {
+      if (category.toLowerCase().includes(searchQuery)) {
+        emojis.forEach(e => matchedFromKeywords.add(e));
+      }
+    });
+
+    if (matchedFromKeywords.size > 0) {
+      matchedFromKeywords.forEach(emoji => {
+        const btn = document.createElement('button');
+        btn.className = 'emoji-item';
+        btn.textContent = emoji;
+        btn.addEventListener('click', () => insertEmojiAtCursor(emoji));
+        grid.appendChild(btn);
+      });
+    } else {
+      grid.innerHTML = '<p class="empty-state" style="padding:10px;font-size:13px;">Không tìm thấy emoji</p>';
+    }
+  } else {
+    // Category mode
+    Object.entries(EMOJI_DATA).forEach(([category, emojis]) => {
+      const header = document.createElement('div');
+      header.className = 'emoji-category-header';
+      header.textContent = category;
+      grid.appendChild(header);
+
+      const categoryGrid = document.createElement('div');
+      categoryGrid.className = 'emoji-category-grid';
+      emojis.forEach(emoji => {
+        const btn = document.createElement('button');
+        btn.className = 'emoji-item';
+        btn.textContent = emoji;
+        btn.addEventListener('click', () => insertEmojiAtCursor(emoji));
+        categoryGrid.appendChild(btn);
+      });
+      grid.appendChild(categoryGrid);
+    });
+  }
+}
+
+function renderStickerGrid() {
+  const grid = $('#sticker-grid');
+  grid.innerHTML = '';
+
+  STICKERS.forEach(sticker => {
+    const btn = document.createElement('button');
+    btn.className = 'sticker-item';
+    btn.textContent = sticker;
+    btn.addEventListener('click', () => sendSticker(sticker));
+    grid.appendChild(btn);
+  });
+}
+
+function insertEmojiAtCursor(emoji) {
+  const input = $('#message-input');
+  if (!input) return;
+
+  const start = input.selectionStart;
+  const end = input.selectionEnd;
+  const value = input.value;
+  input.value = value.substring(0, start) + emoji + value.substring(end);
+  input.selectionStart = input.selectionEnd = start + emoji.length;
+  input.focus();
+
+  // Close picker
+  emojiPickerOpen = false;
+  const picker = $('#emoji-picker');
+  if (picker) picker.classList.add('hidden');
+}
+
+function sendSticker(sticker) {
+  if (!selectedUserId) return;
+
+  const content = '[sticker]' + sticker;
+  const tempId = nextTempId--;
+  const msg = {
+    id: tempId,
+    sender_id: currentUser.id,
+    receiver_id: selectedUserId,
+    content,
+    created_at: new Date().toISOString(),
+    pending: true
+  };
+
+  appendMessage(msg);
+  scrollToBottom();
+  updateUserPreview(selectedUserId, content);
+
+  pendingMessages.set(tempId, { content, receiverId: selectedUserId });
+  sendPendingMessage(tempId);
+
+  // Close picker
+  emojiPickerOpen = false;
+  const picker = $('#emoji-picker');
+  if (picker) picker.classList.add('hidden');
+}
+
+// ---- EMOJI SUGGEST (:keyword) ----
+
+let emojiSuggestVisible = false;
+
+function initEmojiSuggest() {
+  const input = $('#message-input');
+  const suggest = $('#emoji-suggest');
+  if (!input || !suggest) return;
+
+  input.addEventListener('input', () => {
+    const value = input.value;
+    const cursorPos = input.selectionStart;
+    const textBeforeCursor = value.substring(0, cursorPos);
+
+    // Find :keyword pattern
+    const match = textBeforeCursor.match(/:([a-zA-Z\u00C0-\u024F]+)$/);
+
+    if (match) {
+      const keyword = match[1].toLowerCase()
+        // Normalize Vietnamese characters for matching
+        .replace(/[àáảãạăắằẳẵặâấầẩẫậ]/g, 'a')
+        .replace(/[èéẻẽẹêếềểễệ]/g, 'e')
+        .replace(/[ìíỉĩị]/g, 'i')
+        .replace(/[òóỏõọôốồổỗộơớờởỡợ]/g, 'o')
+        .replace(/[ùúủũụưứừửữự]/g, 'u')
+        .replace(/[ỳýỷỹỵ]/g, 'y')
+        .replace(/đ/g, 'd');
+
+      const matches = [];
+      Object.entries(EMOJI_KEYWORDS).forEach(([key, emojis]) => {
+        if (key.includes(keyword)) {
+          emojis.forEach(e => {
+            if (!matches.includes(e)) matches.push(e);
+          });
+        }
+      });
+
+      if (matches.length > 0) {
+        showEmojiSuggest(suggest, matches.slice(0, 12), match[0], cursorPos);
+        return;
+      }
+    }
+
+    hideEmojiSuggest(suggest);
+  });
+
+  // Hide on blur (with delay so click can register)
+  input.addEventListener('blur', () => {
+    setTimeout(() => hideEmojiSuggest(suggest), 200);
+  });
+}
+
+function showEmojiSuggest(suggest, emojis, matchText, cursorPos) {
+  suggest.innerHTML = '';
+  emojiSuggestVisible = true;
+  suggest.classList.remove('hidden');
+
+  emojis.forEach(emoji => {
+    const btn = document.createElement('button');
+    btn.className = 'emoji-suggest-item';
+    btn.textContent = emoji;
+    btn.addEventListener('mousedown', (e) => {
+      e.preventDefault(); // Prevent blur
+      const input = $('#message-input');
+      const value = input.value;
+      const start = cursorPos - matchText.length;
+      input.value = value.substring(0, start) + emoji + value.substring(cursorPos);
+      input.selectionStart = input.selectionEnd = start + emoji.length;
+      input.focus();
+      hideEmojiSuggest(suggest);
+    });
+    suggest.appendChild(btn);
+  });
+}
+
+function hideEmojiSuggest(suggest) {
+  if (!suggest) return;
+  emojiSuggestVisible = false;
+  suggest.classList.add('hidden');
+  suggest.innerHTML = '';
 }
 
 // Send message - OPTIMISTIC UI
@@ -517,6 +977,15 @@ $('#message-form').addEventListener('submit', (e) => {
   const input = $('#message-input');
   const content = input.value.trim();
   if (!content || !selectedUserId) return;
+
+  // Close emoji picker if open
+  emojiPickerOpen = false;
+  const picker = $('#emoji-picker');
+  if (picker) picker.classList.add('hidden');
+
+  // Hide emoji suggest
+  const suggest = $('#emoji-suggest');
+  if (suggest) hideEmojiSuggest(suggest);
 
   const tempId = nextTempId--;
   const msg = {
@@ -815,5 +1284,9 @@ async function adminDeleteUser(userId, username) {
   } catch (err) { if (err.message !== 'Unauthorized') alert('Lỗi kết nối server'); }
 }
 
+// ---- INIT ----
+
+initEmojiPicker();
+initEmojiSuggest();
 setInterval(loadUsers, 10000);
 checkAuth();

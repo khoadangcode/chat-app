@@ -49,7 +49,19 @@ db.exec(`
     FOREIGN KEY (blocked_id) REFERENCES users(id)
   );
 
+  CREATE TABLE IF NOT EXISTS reactions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    emoji TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(message_id, user_id),
+    FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES users(id)
+  );
+
   CREATE INDEX IF NOT EXISTS idx_messages_users ON messages(sender_id, receiver_id);
+  CREATE INDEX IF NOT EXISTS idx_reactions_message ON reactions(message_id);
 `);
 
 // Migration for existing DB: add columns if missing
@@ -247,6 +259,25 @@ app.get('/api/messages/:userId', requireAuth, (req, res) => {
     ORDER BY m.created_at ASC
     LIMIT 200
   `).all(req.userId, otherId, otherId, req.userId);
+
+  // Attach reactions to each message
+  const msgIds = messages.map(m => m.id);
+  if (msgIds.length > 0) {
+    const placeholders = msgIds.map(() => '?').join(',');
+    const reactions = db.prepare(`
+      SELECT r.message_id, r.user_id, r.emoji, u.username
+      FROM reactions r JOIN users u ON r.user_id = u.id
+      WHERE r.message_id IN (${placeholders})
+    `).all(...msgIds);
+
+    const reactMap = {};
+    reactions.forEach(r => {
+      if (!reactMap[r.message_id]) reactMap[r.message_id] = [];
+      reactMap[r.message_id].push({ user_id: r.user_id, emoji: r.emoji, username: r.username });
+    });
+    messages.forEach(m => { m.reactions = reactMap[m.id] || []; });
+  }
+
   res.json(messages);
 });
 
@@ -426,6 +457,45 @@ io.on('connection', (socket) => {
       receiverSockets.forEach(sid => {
         io.to(sid).emit('new_message', message);
       });
+    }
+  });
+
+  socket.on('add_reaction', (data) => {
+    const { messageId, emoji } = data;
+    if (!messageId || !emoji) return;
+
+    const msg = db.prepare('SELECT sender_id, receiver_id FROM messages WHERE id = ?').get(messageId);
+    if (!msg) return;
+    // Only allow reacting to messages in your conversations
+    if (msg.sender_id !== userId && msg.receiver_id !== userId) return;
+
+    db.prepare('INSERT OR REPLACE INTO reactions (message_id, user_id, emoji) VALUES (?, ?, ?)').run(messageId, userId, emoji);
+
+    const reaction = { messageId, userId, emoji, username };
+    // Notify both parties
+    const otherId = msg.sender_id === userId ? msg.receiver_id : msg.sender_id;
+    socket.emit('reaction_updated', reaction);
+    const otherSockets = onlineUsers.get(otherId);
+    if (otherSockets) {
+      otherSockets.forEach(sid => io.to(sid).emit('reaction_updated', reaction));
+    }
+  });
+
+  socket.on('remove_reaction', (data) => {
+    const { messageId } = data;
+    if (!messageId) return;
+
+    db.prepare('DELETE FROM reactions WHERE message_id = ? AND user_id = ?').run(messageId, userId);
+
+    const msg = db.prepare('SELECT sender_id, receiver_id FROM messages WHERE id = ?').get(messageId);
+    if (!msg) return;
+
+    const removal = { messageId, userId, emoji: null };
+    const otherId = msg.sender_id === userId ? msg.receiver_id : msg.sender_id;
+    socket.emit('reaction_updated', removal);
+    const otherSockets = onlineUsers.get(otherId);
+    if (otherSockets) {
+      otherSockets.forEach(sid => io.to(sid).emit('reaction_updated', removal));
     }
   });
 

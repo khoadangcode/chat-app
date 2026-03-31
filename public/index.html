@@ -129,7 +129,22 @@
             <span></span> đang nhập...
           </div>
 
+          <!-- Emoji/Sticker Picker -->
+          <div id="emoji-picker" class="emoji-picker hidden">
+            <div class="emoji-picker-tabs">
+              <button class="emoji-tab active" data-tab="emoji">Emoji</button>
+              <button class="emoji-tab" data-tab="sticker">Sticker</button>
+            </div>
+            <div class="emoji-search-box">
+              <input type="text" id="emoji-search" placeholder="Tìm emoji...">
+            </div>
+            <div id="emoji-grid" class="emoji-grid"></div>
+            <div id="sticker-grid" class="sticker-grid hidden"></div>
+            <div id="emoji-suggest" class="emoji-suggest hidden"></div>
+          </div>
+
           <form id="message-form" class="message-form">
+            <button type="button" id="emoji-btn" class="emoji-btn" title="Emoji & Sticker">😊</button>
             <input type="text" id="message-input" placeholder="Nhập tin nhắn..." autocomplete="off" maxlength="2000">
             <button type="submit">
               <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
