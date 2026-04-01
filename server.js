@@ -153,9 +153,12 @@ const BOT_USERNAME = 'AI Bot';
 let BOT_ID;
 
 let geminiModel = null;
-const BOT_SYSTEM_PROMPT = `Bạn là "AI Bot", một chatbot thân thiện trong app nhắn tin. Quy tắc:
-- Trả lời bằng tiếng Việt, ngắn gọn (1-3 câu)
+const BOT_SYSTEM_PROMPT = `Bạn là "AI Bot", một chatbot thân thiện và thông minh trong app nhắn tin. Quy tắc:
+- Trả lời bằng tiếng Việt, ngắn gọn nhưng đầy đủ
 - Vui vẻ, dùng emoji phù hợp
+- Bạn CÓ KHẢ NĂNG nhìn và phân tích hình ảnh. Khi người dùng gửi ảnh, hãy phân tích chi tiết.
+- Nếu người dùng hỏi về hình ảnh đã gửi trước đó, hãy dựa vào ngữ cảnh cuộc hội thoại để trả lời.
+- Khi được yêu cầu giải bài toán, hãy giải CHI TIẾT từng bước.
 - Nếu không biết thì nói thẳng
 - Không bao giờ giả vờ là người thật`;
 
@@ -182,6 +185,16 @@ setInterval(() => {
     }
   }
 }, 10 * 60 * 1000);
+
+// --- BOT MESSAGE QUEUE (prevent race conditions) ---
+const botQueues = new Map(); // userId -> Promise
+
+function queueBotReply(userId, prompt, imageData) {
+  const prev = botQueues.get(userId) || Promise.resolve();
+  const next = prev.then(() => getBotReply(prompt, imageData, userId)).catch(() => 'Ối, lỗi rồi 😵');
+  botQueues.set(userId, next);
+  return next;
+}
 
 function stripImagesFromHistory(history) {
   return history.map(entry => ({
@@ -879,7 +892,7 @@ io.on('connection', async (socket) => {
           botPrompt = 'Hãy mô tả và phân tích hình ảnh này.';
         }
       }
-      getBotReply(botPrompt, botImageData, userId).then(async (reply) => {
+      queueBotReply(userId, botPrompt, botImageData).then(async (reply) => {
         const { rows: botInserted } = await pool.query(
           'INSERT INTO messages (sender_id, receiver_id, content) VALUES ($1, $2, $3) RETURNING id',
           [BOT_ID, userId, reply]
