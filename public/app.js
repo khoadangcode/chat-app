@@ -1556,6 +1556,98 @@ function initImageUpload() {
   });
 }
 
+// ---- CLIPBOARD PASTE IMAGE ----
+
+function initClipboardPaste() {
+  const chatBox = $('#chat-box');
+  const messageInput = $('#message-input');
+  if (!chatBox || !messageInput) return;
+
+  function handlePasteImage(e) {
+    const items = e.clipboardData && e.clipboardData.items;
+    if (!items) return;
+
+    let imageFile = null;
+    for (let i = 0; i < items.length; i++) {
+      if (items[i].type.startsWith('image/')) {
+        imageFile = items[i].getAsFile();
+        break;
+      }
+    }
+    if (!imageFile) return;
+
+    // Prevent default so the image blob isn't inserted as text
+    e.preventDefault();
+
+    if (!selectedUserId && !selectedGroupId) {
+      alert('Vui lòng chọn người nhận trước.');
+      return;
+    }
+
+    if (imageFile.size > 500 * 1024) {
+      alert('Hình ảnh từ clipboard quá lớn! Tối đa 500KB.');
+      return;
+    }
+
+    // Show a brief toast so the user knows the image was captured
+    showPasteToast(imageFile.name || 'clipboard-image');
+
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const dataUrl = ev.target.result;
+      const content = '[image]' + dataUrl;
+
+      const tempId = nextTempId--;
+      if (selectedGroupId) {
+        const msg = { id: tempId, sender_id: currentUser.id, group_id: selectedGroupId, sender_name: currentUser.display_name || currentUser.username, content, created_at: new Date().toISOString(), pending: true };
+        appendMessage(msg, true, true);
+        scrollToBottom();
+        pendingMessages.set(tempId, { content, groupId: selectedGroupId });
+        sendPendingMessage(tempId);
+      } else {
+        const msg = { id: tempId, sender_id: currentUser.id, receiver_id: selectedUserId, content, created_at: new Date().toISOString(), pending: true };
+        appendMessage(msg);
+        scrollToBottom();
+        updateUserPreview(selectedUserId, content);
+        pendingMessages.set(tempId, { content, receiverId: selectedUserId });
+        sendPendingMessage(tempId);
+      }
+    };
+    reader.readAsDataURL(imageFile);
+  }
+
+  // Listen on the input field (Ctrl+V while typing)
+  messageInput.addEventListener('paste', handlePasteImage);
+
+  // Also listen on the entire chat-box area so paste works even when
+  // the input is not focused (e.g. after scrolling through messages)
+  chatBox.addEventListener('paste', (e) => {
+    // Avoid double-fire when the event bubbles from messageInput
+    if (e.target === messageInput) return;
+    handlePasteImage(e);
+  });
+}
+
+function showPasteToast(fileName) {
+  // Remove any existing toast
+  const old = $('#paste-toast');
+  if (old) old.remove();
+
+  const toast = document.createElement('div');
+  toast.id = 'paste-toast';
+  toast.textContent = '📷 Đang gửi ảnh từ clipboard...';
+  toast.style.cssText =
+    'position:fixed;bottom:80px;left:50%;transform:translateX(-50%);' +
+    'background:var(--primary,#5b5ea6);color:#fff;padding:8px 18px;' +
+    'border-radius:20px;font-size:13px;z-index:9999;opacity:1;' +
+    'transition:opacity 0.4s ease;box-shadow:0 2px 12px rgba(0,0,0,0.2);' +
+    'pointer-events:none;';
+  document.body.appendChild(toast);
+
+  setTimeout(() => { toast.style.opacity = '0'; }, 1500);
+  setTimeout(() => { toast.remove(); }, 2000);
+}
+
 // ---- FILE UPLOAD ----
 
 function initFileUpload() {
@@ -2256,6 +2348,7 @@ initEmojiPicker();
 initEmojiSuggest();
 initImageUpload();
 initFileUpload();
+initClipboardPaste();
 initInfiniteScroll();
 initMessageSearch();
 initProfile();

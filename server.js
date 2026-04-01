@@ -168,10 +168,20 @@ if (process.env.GEMINI_API_KEY) {
   console.log('Gemini AI Bot enabled');
 }
 
-async function getBotReply(userMessage) {
+async function getBotReply(userMessage, imageData) {
   if (!geminiModel) return 'Xin lỗi, AI Bot chưa được kích hoạt 🔑';
   try {
-    const result = await geminiModel.generateContent(userMessage);
+    let result;
+    if (imageData) {
+      // Multimodal: send text prompt + image to Gemini
+      const prompt = userMessage || 'Hãy mô tả hình ảnh này.';
+      result = await geminiModel.generateContent([
+        { text: prompt },
+        { inlineData: { mimeType: imageData.mimeType, data: imageData.base64 } }
+      ]);
+    } else {
+      result = await geminiModel.generateContent(userMessage);
+    }
     return result.response.text().slice(0, 2000);
   } catch (err) {
     console.error('Gemini error:', err.message);
@@ -804,7 +814,18 @@ io.on('connection', async (socket) => {
     socket.emit('new_message', message);
 
     if (receiverId === BOT_ID) {
-      getBotReply(sanitized).then(async (reply) => {
+      // Detect image message: content starts with [image] followed by a data URL
+      let botPrompt = sanitized;
+      let botImageData = null;
+      if (sanitized.startsWith('[image]')) {
+        const dataUrl = sanitized.slice(7).trim(); // Remove [image] prefix
+        const match = dataUrl.match(/^data:(.+?);base64,(.+)$/s);
+        if (match) {
+          botImageData = { mimeType: match[1], base64: match[2] };
+          botPrompt = 'Hãy mô tả và phân tích hình ảnh này.';
+        }
+      }
+      getBotReply(botPrompt, botImageData).then(async (reply) => {
         const { rows: botInserted } = await pool.query(
           'INSERT INTO messages (sender_id, receiver_id, content) VALUES ($1, $2, $3) RETURNING id',
           [BOT_ID, userId, reply]
