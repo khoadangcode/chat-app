@@ -179,7 +179,7 @@ const BOT_SYSTEM_PROMPT = `Bạn là "AI Bot", một chatbot thân thiện và t
 if (process.env.GEMINI_API_KEY) {
   const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
   geminiModel = genAI.getGenerativeModel({
-    model: 'gemini-2.5-flash',
+    model: process.env.GEMINI_MODEL || 'gemini-2.0-flash',
     systemInstruction: BOT_SYSTEM_PROMPT
   });
   console.log('Gemini AI Bot enabled');
@@ -260,9 +260,11 @@ async function getBotReply(userMessage, imageData, userId) {
       conv.messages.push({ role: 'bot', text: reply });
       return reply;
     } catch (err2) {
-      console.error('Gemini fallback error:', err2.message, err2.stack);
-      // Show actual error to help debug
-      return '⚠️ Lỗi Gemini: ' + (err2.message || 'Unknown').slice(0, 300) + '\n\nLỗi gốc: ' + (err.message || 'Unknown').slice(0, 300);
+      console.error('Gemini fallback error:', err2.message);
+      if (err2.message && err2.message.includes('429')) {
+        return '⏳ Bot đang bị giới hạn tần suất. Vui lòng thử lại sau 1 phút nhé!';
+      }
+      return '⚠️ Bot tạm thời lỗi: ' + (err2.message || '').slice(0, 150);
     }
   }
 }
