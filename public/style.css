@@ -1348,11 +1348,422 @@ body {
   position: relative;
 }
 
-/* Responsive */
+/* ---- IMAGE MESSAGES ---- */
+.message-image {
+  max-width: 280px;
+  max-height: 300px;
+  border-radius: 12px;
+  cursor: pointer;
+  display: block;
+  margin: 4px 0;
+}
+
+.message.sent .message-image {
+  margin-left: auto;
+}
+
+/* Image upload button */
+.image-upload-btn {
+  width: 44px;
+  height: 44px;
+  border: none;
+  background: transparent;
+  font-size: 20px;
+  cursor: pointer;
+  border-radius: 50%;
+  transition: background 0.2s;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-light);
+}
+
+.image-upload-btn:hover {
+  background: var(--bg);
+  color: var(--text);
+}
+
+/* Full screen image viewer */
+.image-viewer {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0,0,0,0.9);
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.image-viewer img {
+  max-width: 90vw;
+  max-height: 90vh;
+  border-radius: 8px;
+}
+
+/* ---- READ RECEIPTS ---- */
+.msg-status.read {
+  color: #3b82f6;
+  opacity: 1;
+}
+
+[data-theme="dark"] .msg-status.read {
+  color: #60a5fa;
+}
+
+/* ---- GROUP CHAT ---- */
+/* Group section in sidebar */
+.group-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 16px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-light);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.create-group-btn {
+  width: 28px;
+  height: 28px;
+  border: 1.5px solid var(--border);
+  background: transparent;
+  border-radius: 50%;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  color: var(--text-light);
+  transition: all 0.2s;
+}
+
+.create-group-btn:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+  background: #f0f0ff;
+}
+
+[data-theme="dark"] .create-group-btn:hover {
+  background: #2d2d5e;
+}
+
+.group-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border-radius: 12px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.group-item:hover {
+  background: var(--bg);
+}
+
+.group-item.active {
+  background: #ededf7;
+}
+
+[data-theme="dark"] .group-item.active {
+  background: #2d2d5e;
+}
+
+.group-avatar {
+  width: 40px;
+  height: 40px;
+  min-width: 40px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--primary), #3d85c6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  color: white;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+}
+
+/* Create group modal */
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0,0,0,0.5);
+  z-index: 150;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.modal {
+  background: var(--white);
+  border-radius: 16px;
+  padding: 24px;
+  width: 380px;
+  max-height: 80vh;
+  overflow-y: auto;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.2);
+}
+
+.modal h3 {
+  font-size: 18px;
+  margin-bottom: 16px;
+}
+
+.modal input {
+  width: 100%;
+  padding: 10px 14px;
+  border: 1.5px solid var(--border);
+  border-radius: 10px;
+  font-size: 14px;
+  outline: none;
+  background: var(--bg);
+  color: var(--text);
+  margin-bottom: 12px;
+}
+
+.modal input:focus {
+  border-color: var(--primary);
+}
+
+.member-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.member-checkbox:hover {
+  background: var(--bg);
+}
+
+.member-checkbox input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--primary);
+}
+
+.modal-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.modal-actions button {
+  flex: 1;
+  padding: 10px;
+  border-radius: 10px;
+  border: none;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.modal-actions .btn-primary {
+  background: var(--primary);
+  color: white;
+}
+
+.modal-actions .btn-cancel {
+  background: var(--bg);
+  color: var(--text);
+}
+
+/* ---- MOBILE RESPONSIVE ELEMENTS ---- */
+/* Sidebar overlay when sidebar is open on mobile */
+.sidebar-overlay {
+  display: none;
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0,0,0,0.4);
+  z-index: 55;
+}
+
+body.mobile .sidebar-overlay.open {
+  display: block;
+}
+
+/* Mobile hamburger button */
+.mobile-menu-btn {
+  display: none;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text);
+  padding: 8px;
+  border-radius: 8px;
+}
+
+body.mobile .mobile-menu-btn {
+  display: flex;
+  align-items: center;
+}
+
+/* Mobile back button in chat header */
+.back-btn {
+  display: none;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text);
+  padding: 6px;
+  border-radius: 8px;
+  margin-right: 4px;
+}
+
+body.mobile .back-btn {
+  display: flex;
+  align-items: center;
+}
+
+/* ---- MOBILE RESPONSIVE ---- */
+
+/* Mobile-only buttons hidden by default */
+.mobile-only-btn {
+  display: none !important;
+}
+
+body.mobile .mobile-only-btn {
+  display: flex !important;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Mobile layout: sidebar and chat area toggle */
+body.mobile .chat-layout {
+  position: relative;
+}
+
+body.mobile .sidebar {
+  position: fixed;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 100vw;
+  min-width: 100vw;
+  z-index: 60;
+  transition: transform 0.3s ease;
+  transform: translateX(0);
+}
+
+body.mobile .sidebar.sidebar-hidden {
+  transform: translateX(-100%);
+}
+
+body.mobile .chat-area {
+  position: fixed;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 100vw;
+  z-index: 50;
+  transform: translateX(100%);
+  transition: transform 0.3s ease;
+}
+
+body.mobile .chat-area.chat-visible {
+  transform: translateX(0);
+}
+
+#mobile-back-btn {
+  margin-right: 8px;
+  flex-shrink: 0;
+}
+
+/* ---- IMAGE MESSAGES ---- */
+
+.chat-image {
+  max-width: 260px;
+  max-height: 260px;
+  border-radius: 8px;
+  display: block;
+  margin-bottom: 4px;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+
+.chat-image:hover {
+  opacity: 0.9;
+}
+
+.image-message {
+  padding: 6px !important;
+}
+
+/* ---- READ RECEIPTS ---- */
+
+.msg-status.read {
+  color: #3b82f6;
+  font-weight: 600;
+}
+
+/* ---- GROUP CHAT ---- */
+
+.group-list-section {
+  border-top: 1px solid var(--border);
+}
+
+.group-list-header {
+  padding: 10px 16px 6px;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--text-light);
+  letter-spacing: 0.5px;
+}
+
+.group-list {
+  overflow-y: auto;
+}
+
+.group-avatar {
+  font-size: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.group-sender-name {
+  font-size: 11px;
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+
+/* ---- SEARCH BOX with create group button ---- */
+
+.search-box {
+  display: flex;
+  align-items: center;
+}
+
+.search-box input {
+  flex: 1;
+  min-width: 0;
+}
+
+#create-group-btn {
+  flex-shrink: 0;
+}
+
+/* ---- RESPONSIVE ---- */
 @media (max-width: 768px) {
   .sidebar {
-    width: 260px;
-    min-width: 260px;
+    width: 100vw;
+    min-width: 100vw;
   }
   .message {
     max-width: 80%;
@@ -1370,5 +1781,43 @@ body {
   }
   .admin-panel-header {
     padding: 16px;
+  }
+
+  /* Mobile: adjust emoji picker */
+  .emoji-picker {
+    width: 280px;
+    left: 10px;
+  }
+
+  /* Mobile: adjust modal */
+  .modal {
+    width: calc(100vw - 32px);
+    margin: 16px;
+  }
+
+  /* Mobile: adjust messages padding */
+  .messages {
+    padding: 16px 12px;
+  }
+
+  /* Mobile: adjust chat header */
+  .chat-header {
+    padding: 12px 16px;
+  }
+
+  /* Mobile: adjust message form */
+  .message-form {
+    padding: 10px 12px 14px;
+  }
+
+  /* Mobile: image messages fit screen */
+  .chat-image {
+    max-width: 200px;
+    max-height: 220px;
+  }
+
+  .message-image {
+    max-width: 200px;
+    max-height: 220px;
   }
 }

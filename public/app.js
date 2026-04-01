@@ -5,11 +5,14 @@ const $$ = (sel) => document.querySelectorAll(sel);
 let currentUser = null;
 let authToken = localStorage.getItem('authToken');
 let selectedUserId = null;
+let selectedGroupId = null; // Group chat state
 let socket = null;
 let onlineUserIds = [];
 let unreadCounts = {};
 let blockedUserIds = new Set();
 let userRoles = {}; // userId -> role
+let allUsers = []; // Cache for group creation
+let lastSeenData = {}; // userId -> last_seen timestamp
 
 // Message queue for offline/pending messages
 const pendingMessages = new Map();
@@ -158,6 +161,24 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
+// ---- LAST SEEN HELPER ----
+
+function formatLastSeen(lastSeenStr) {
+  if (!lastSeenStr) return 'Offline';
+  const lastSeen = new Date(lastSeenStr);
+  const now = new Date();
+  const diffMs = now - lastSeen;
+  const diffMin = Math.floor(diffMs / 60000);
+  const diffHour = Math.floor(diffMs / 3600000);
+  const diffDay = Math.floor(diffMs / 86400000);
+
+  if (diffMin < 1) return 'Online vừa mới';
+  if (diffMin < 60) return `Online ${diffMin} phút trước`;
+  if (diffHour < 24) return `Online ${diffHour} giờ trước`;
+  if (diffDay < 7) return `Online ${diffDay} ngày trước`;
+  return 'Offline';
+}
+
 // ---- AUTH HELPERS ----
 
 function saveToken(token) {
@@ -186,6 +207,7 @@ function handleAuthFailure() {
   currentUser = null;
   clearToken();
   selectedUserId = null;
+  selectedGroupId = null;
   unreadCounts = {};
   blockedUserIds = new Set();
   pendingMessages.clear();
@@ -289,6 +311,7 @@ function enterChat(user) {
   connectSocket();
   loadBlockedUsers();
   loadUsers();
+  loadGroups();
 }
 
 function connectSocket() {
@@ -329,6 +352,9 @@ function connectSocket() {
     loadUsers();
     if (selectedUserId) {
       selectUser(selectedUserId, $('#chat-with-name').textContent);
+    } else if (selectedGroupId) {
+      const name = $('#chat-with-name').textContent;
+      selectGroup(selectedGroupId, name);
     }
   });
 
@@ -402,6 +428,41 @@ function connectSocket() {
     // data: { messageId, reactions: [{ emoji, user_id, username }, ...] }
     updateMessageReactions(data.messageId, data.reactions);
   });
+
+  // ---- READ RECEIPTS socket listener ----
+  socket.on('messages_read', (data) => {
+    // data: { readerId } - the user who read our messages
+    const readerId = data.readerId;
+    // If we're currently chatting with this user, update all sent messages to "read"
+    if (readerId === selectedUserId) {
+      $$('.message.sent .msg-status').forEach(statusEl => {
+        if (statusEl.textContent === '✓') {
+          statusEl.textContent = '✓✓';
+          statusEl.classList.add('read');
+        }
+      });
+    }
+  });
+
+  // ---- GROUP CHAT socket listener ----
+  socket.on('new_group_message', (msg) => {
+    // msg: { id, group_id, sender_id, sender_name, content, created_at }
+    if (msg.sender_id !== currentUser.id) {
+      playNotifSound();
+    }
+
+    if (selectedGroupId === msg.group_id) {
+      // Skip if we sent it optimistically
+      if (msg.sender_id === currentUser.id) {
+        const existing = document.querySelector(`[data-msg-id="${msg.id}"]`);
+        if (existing) return;
+        const pendingEl = document.querySelector('.message.pending');
+        if (pendingEl) return;
+      }
+      appendMessage(msg, true, true);
+      scrollToBottom();
+    }
+  });
 }
 
 // ---- MESSAGE QUEUE ----
@@ -416,22 +477,42 @@ function sendPendingMessage(tempId) {
   const pending = pendingMessages.get(tempId);
   if (!pending || !socket || !socket.connected) return;
 
-  socket.emit('send_message',
-    { receiverId: pending.receiverId, content: pending.content, tempId },
-    (ack) => {
-      if (ack && ack.success) {
-        // Update UI: remove pending state, set real ID
-        const el = document.querySelector(`[data-msg-id="${tempId}"]`);
-        if (el) {
-          el.dataset.msgId = ack.messageId;
-          el.classList.remove('pending');
-          const status = el.querySelector('.msg-status');
-          if (status) status.textContent = '✓';
+  if (pending.groupId) {
+    // Group message
+    socket.emit('send_group_message',
+      { groupId: pending.groupId, content: pending.content, tempId },
+      (ack) => {
+        if (ack && ack.success) {
+          const el = document.querySelector(`[data-msg-id="${tempId}"]`);
+          if (el) {
+            el.dataset.msgId = ack.messageId;
+            el.classList.remove('pending');
+            const status = el.querySelector('.msg-status');
+            if (status) status.textContent = '✓';
+          }
+          pendingMessages.delete(tempId);
         }
-        pendingMessages.delete(tempId);
       }
-    }
-  );
+    );
+  } else {
+    // DM message
+    socket.emit('send_message',
+      { receiverId: pending.receiverId, content: pending.content, tempId },
+      (ack) => {
+        if (ack && ack.success) {
+          // Update UI: remove pending state, set real ID
+          const el = document.querySelector(`[data-msg-id="${tempId}"]`);
+          if (el) {
+            el.dataset.msgId = ack.messageId;
+            el.classList.remove('pending');
+            const status = el.querySelector('.msg-status');
+            if (status) status.textContent = '✓';
+          }
+          pendingMessages.delete(tempId);
+        }
+      }
+    );
+  }
 }
 
 // ---- CONNECTION UI ----
@@ -458,6 +539,11 @@ async function loadUsers() {
   try {
     const res = await authFetch('/api/users');
     const users = await res.json();
+    allUsers = users; // Cache for group creation
+    // Store last_seen data
+    users.forEach(u => {
+      if (u.last_seen) lastSeenData[u.id] = u.last_seen;
+    });
     renderUserList(users);
   } catch (err) {
     if (err.message !== 'Unauthorized') console.warn('Failed to load users');
@@ -476,7 +562,7 @@ function renderUserList(users) {
     userRoles[user.id] = user.role;
     const isOnline = user.role === 'bot' || onlineUserIds.includes(user.id);
     const item = document.createElement('div');
-    item.className = 'user-item' + (user.id === selectedUserId ? ' active' : '');
+    item.className = 'user-item' + (user.id === selectedUserId && !selectedGroupId ? ' active' : '');
     item.dataset.userId = user.id;
     item.dataset.username = user.username;
 
@@ -515,6 +601,11 @@ function renderUserList(users) {
       const name = item.dataset.username.toLowerCase();
       item.style.display = name.includes(q) ? '' : 'none';
     });
+    // Also filter groups
+    $$('.group-item').forEach(item => {
+      const name = (item.dataset.groupName || '').toLowerCase();
+      item.style.display = name.includes(q) ? '' : 'none';
+    });
   };
 }
 
@@ -529,10 +620,23 @@ function updateUserListOnlineStatus() {
 
 function updateChatHeaderStatus() {
   if (!selectedUserId) return;
+  if (selectedGroupId) return; // Groups don't have online status
   const isOnline = onlineUserIds.includes(selectedUserId);
   const statusEl = $('#chat-status');
-  statusEl.textContent = isOnline ? 'Online' : 'Offline';
-  statusEl.className = 'status-text' + (isOnline ? ' online' : '');
+
+  if (isOnline) {
+    statusEl.textContent = 'Online';
+    statusEl.className = 'status-text online';
+  } else {
+    // Show last seen if available
+    const lastSeen = lastSeenData[selectedUserId];
+    if (lastSeen) {
+      statusEl.textContent = formatLastSeen(lastSeen);
+    } else {
+      statusEl.textContent = 'Offline';
+    }
+    statusEl.className = 'status-text';
+  }
 
   const avatar = $('#chat-avatar');
   avatar.className = 'user-avatar' + (isOnline ? ' online' : '');
@@ -557,13 +661,20 @@ function updateUnreadBadge(userId) {
 
 function updateUserPreview(userId, text) {
   const el = document.querySelector(`[data-preview-for="${userId}"]`);
-  if (el) el.textContent = text.slice(0, 40);
+  if (el) {
+    if (text && text.startsWith('[image]')) {
+      el.textContent = '📷 Hình ảnh';
+    } else {
+      el.textContent = text.slice(0, 40);
+    }
+  }
 }
 
 // ---- MESSAGES ----
 
 async function selectUser(userId, username) {
   selectedUserId = userId;
+  selectedGroupId = null; // Deselect group
 
   delete unreadCounts[userId];
   updateUnreadBadge(userId);
@@ -571,6 +682,8 @@ async function selectUser(userId, username) {
   $$('.user-item').forEach(item => {
     item.classList.toggle('active', parseInt(item.dataset.userId) === userId);
   });
+  // Deselect groups
+  $$('.group-item').forEach(item => item.classList.remove('active'));
 
   $('#no-chat').classList.add('hidden');
   $('#chat-box').classList.remove('hidden');
@@ -578,6 +691,12 @@ async function selectUser(userId, username) {
   setStaticAvatar($('#chat-avatar'), username, onlineUserIds.includes(userId));
   updateChatHeaderStatus();
   updateBlockButton();
+
+  // Mobile: hide sidebar and show chat
+  if (document.body.classList.contains('mobile')) {
+    $('.sidebar').classList.add('sidebar-hidden');
+    $('.chat-area').classList.add('chat-visible');
+  }
 
   $('#messages').innerHTML = '';
   try {
@@ -597,6 +716,15 @@ async function selectUser(userId, username) {
       appendMessage(msg, false);
     });
     scrollToBottom(false);
+
+    // ---- READ RECEIPTS: mark messages as read ----
+    try {
+      authFetch(`/api/messages/read/${userId}`, { method: 'POST' });
+    } catch {}
+    if (socket && socket.connected) {
+      socket.emit('mark_read', { senderId: userId });
+    }
+
   } catch (err) {
     if (err.message !== 'Unauthorized') console.warn('Failed to load messages');
   }
@@ -604,28 +732,43 @@ async function selectUser(userId, username) {
   $('#message-input').focus();
 }
 
-function appendMessage(msg, animate = true) {
+function appendMessage(msg, animate = true, isGroupMsg = false) {
   const isSent = msg.sender_id === currentUser.id;
   const isPending = !!msg.pending;
   const isSticker = msg.content && msg.content.startsWith('[sticker]');
+  const isImage = msg.content && msg.content.startsWith('[image]');
   const el = document.createElement('div');
-  el.className = 'message ' + (isSent ? 'sent' : 'received') + (isPending ? ' pending' : '') + (isSticker ? ' sticker-message' : '');
+  el.className = 'message ' + (isSent ? 'sent' : 'received') + (isPending ? ' pending' : '') + (isSticker ? ' sticker-message' : '') + (isImage ? ' image-message' : '');
   el.dataset.msgId = msg.id;
   if (!animate) el.style.animation = 'none';
 
   let status = '';
   if (isSent) {
-    status = isPending
-      ? '<span class="msg-status">⏳</span>'
-      : '<span class="msg-status">✓</span>';
+    if (isPending) {
+      status = '<span class="msg-status">⏳</span>';
+    } else if (msg.is_read) {
+      status = '<span class="msg-status read">✓✓</span>';
+    } else {
+      status = '<span class="msg-status">✓</span>';
+    }
   }
 
-  if (isSticker) {
+  // Show sender name in group messages for received messages
+  let senderLabel = '';
+  if (isGroupMsg && !isSent && msg.sender_name) {
+    senderLabel = `<div class="group-sender-name" style="font-size:11px;font-weight:600;color:${getColor(msg.sender_name)};margin-bottom:2px;">${escapeHtml(msg.sender_name)}</div>`;
+  }
+
+  if (isImage) {
+    // Render image message
+    const dataUrl = msg.content.substring(7); // Remove [image] prefix
+    el.innerHTML = `${senderLabel}<img src="${dataUrl}" class="chat-image" alt="Hình ảnh" onclick="openImagePreview(this.src)" /><span class="time">${formatTime(msg.created_at)}${status}</span>`;
+  } else if (isSticker) {
     // Render sticker as large emoji without bubble
     const stickerEmoji = msg.content.replace('[sticker]', '').trim();
-    el.innerHTML = `<span class="sticker-display">${stickerEmoji}</span><span class="time">${formatTime(msg.created_at)}${status}</span>`;
+    el.innerHTML = `${senderLabel}<span class="sticker-display">${stickerEmoji}</span><span class="time">${formatTime(msg.created_at)}${status}</span>`;
   } else {
-    el.innerHTML = `${escapeHtml(msg.content)}<span class="time">${formatTime(msg.created_at)}${status}</span>`;
+    el.innerHTML = `${senderLabel}${escapeHtml(msg.content)}<span class="time">${formatTime(msg.created_at)}${status}</span>`;
   }
 
   // Reaction button
@@ -652,6 +795,24 @@ function appendMessage(msg, animate = true) {
 
   $('#messages').appendChild(el);
 }
+
+// ---- IMAGE PREVIEW ----
+
+function openImagePreview(src) {
+  // Remove existing preview
+  const existing = $('#image-preview-overlay');
+  if (existing) existing.remove();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'image-preview-overlay';
+  overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.85);z-index:10000;display:flex;align-items:center;justify-content:center;cursor:pointer;';
+  overlay.innerHTML = `<img src="${src}" style="max-width:90%;max-height:90%;border-radius:8px;box-shadow:0 4px 32px rgba(0,0,0,0.5);" />`;
+  overlay.addEventListener('click', () => overlay.remove());
+  document.body.appendChild(overlay);
+}
+
+// Make it globally accessible
+window.openImagePreview = openImagePreview;
 
 // ---- REACTIONS ----
 
@@ -796,7 +957,6 @@ function renderEmojiPickerContent(searchQuery = '') {
   const emojiGrid = $('#emoji-grid');
   const stickerGrid = $('#sticker-grid');
   if (!emojiGrid || !stickerGrid) return;
-
   if (currentEmojiTab === 'emoji') {
     emojiGrid.classList.remove('hidden');
     stickerGrid.classList.add('hidden');
@@ -898,7 +1058,7 @@ function insertEmojiAtCursor(emoji) {
 }
 
 function sendSticker(sticker) {
-  if (!selectedUserId) return;
+  if (!selectedUserId && !selectedGroupId) return;
 
   const content = '[sticker]' + sticker;
   const tempId = nextTempId--;
@@ -911,11 +1071,21 @@ function sendSticker(sticker) {
     pending: true
   };
 
-  appendMessage(msg);
+  if (selectedGroupId) {
+    msg.group_id = selectedGroupId;
+    msg.sender_name = currentUser.display_name || currentUser.username;
+    appendMessage(msg, true, true);
+  } else {
+    appendMessage(msg);
+  }
   scrollToBottom();
-  updateUserPreview(selectedUserId, content);
+  if (selectedUserId) updateUserPreview(selectedUserId, content);
 
-  pendingMessages.set(tempId, { content, receiverId: selectedUserId });
+  if (selectedGroupId) {
+    pendingMessages.set(tempId, { content, groupId: selectedGroupId });
+  } else {
+    pendingMessages.set(tempId, { content, receiverId: selectedUserId });
+  }
   sendPendingMessage(tempId);
 
   // Close picker
@@ -1011,7 +1181,7 @@ $('#message-form').addEventListener('submit', (e) => {
   e.preventDefault();
   const input = $('#message-input');
   const content = input.value.trim();
-  if (!content || !selectedUserId) return;
+  if (!content || (!selectedUserId && !selectedGroupId)) return;
 
   // Close emoji picker if open
   emojiPickerOpen = false;
@@ -1023,27 +1193,48 @@ $('#message-form').addEventListener('submit', (e) => {
   if (suggest) hideEmojiSuggest(suggest);
 
   const tempId = nextTempId--;
-  const msg = {
-    id: tempId,
-    sender_id: currentUser.id,
-    receiver_id: selectedUserId,
-    content,
-    created_at: new Date().toISOString(),
-    pending: true
-  };
 
-  // Show immediately (optimistic)
-  appendMessage(msg);
-  scrollToBottom();
-  updateUserPreview(selectedUserId, content);
+  if (selectedGroupId) {
+    // Group message
+    const msg = {
+      id: tempId,
+      sender_id: currentUser.id,
+      group_id: selectedGroupId,
+      sender_name: currentUser.display_name || currentUser.username,
+      content,
+      created_at: new Date().toISOString(),
+      pending: true
+    };
+    appendMessage(msg, true, true);
+    scrollToBottom();
+    pendingMessages.set(tempId, { content, groupId: selectedGroupId });
+    input.value = '';
+    input.focus();
+    sendPendingMessage(tempId);
+  } else {
+    // DM message
+    const msg = {
+      id: tempId,
+      sender_id: currentUser.id,
+      receiver_id: selectedUserId,
+      content,
+      created_at: new Date().toISOString(),
+      pending: true
+    };
 
-  // Queue for sending
-  pendingMessages.set(tempId, { content, receiverId: selectedUserId });
-  input.value = '';
-  input.focus();
+    // Show immediately (optimistic)
+    appendMessage(msg);
+    scrollToBottom();
+    updateUserPreview(selectedUserId, content);
 
-  // Try to send now
-  sendPendingMessage(tempId);
+    // Queue for sending
+    pendingMessages.set(tempId, { content, receiverId: selectedUserId });
+    input.value = '';
+    input.focus();
+
+    // Try to send now
+    sendPendingMessage(tempId);
+  }
 });
 
 // Typing indicator
@@ -1064,6 +1255,105 @@ $('#logout-btn').addEventListener('click', async () => {
   $('#login-username').value = '';
   $('#login-password').value = '';
 });
+
+// ---- IMAGE UPLOAD ----
+
+function initImageUpload() {
+  const form = $('#message-form');
+  const emojiBtn = $('#emoji-btn');
+  if (!form || !emojiBtn) return;
+
+  // Create image upload button
+  const imgBtn = document.createElement('button');
+  imgBtn.type = 'button';
+  imgBtn.id = 'image-btn';
+  imgBtn.className = 'emoji-btn';
+  imgBtn.title = 'Gửi hình ảnh';
+  imgBtn.textContent = '📷';
+  imgBtn.style.cssText = 'margin-left:0;';
+
+  // Create hidden file input
+  const fileInput = document.createElement('input');
+  fileInput.type = 'file';
+  fileInput.accept = 'image/*';
+  fileInput.style.display = 'none';
+  fileInput.id = 'image-file-input';
+
+  // Insert after emoji button
+  emojiBtn.parentNode.insertBefore(imgBtn, emojiBtn.nextSibling);
+  form.appendChild(fileInput);
+
+  imgBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    fileInput.click();
+  });
+
+  fileInput.addEventListener('change', () => {
+    const file = fileInput.files[0];
+    if (!file) return;
+
+    // Validate size < 500KB
+    if (file.size > 500 * 1024) {
+      alert('Hình ảnh quá lớn! Tối đa 500KB.');
+      fileInput.value = '';
+      return;
+    }
+
+    // Validate it's actually an image
+    if (!file.type.startsWith('image/')) {
+      alert('Vui lòng chọn file hình ảnh.');
+      fileInput.value = '';
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const dataUrl = ev.target.result;
+      const content = '[image]' + dataUrl;
+
+      if (!selectedUserId && !selectedGroupId) {
+        alert('Vui lòng chọn người nhận trước.');
+        return;
+      }
+
+      const tempId = nextTempId--;
+
+      if (selectedGroupId) {
+        const msg = {
+          id: tempId,
+          sender_id: currentUser.id,
+          group_id: selectedGroupId,
+          sender_name: currentUser.display_name || currentUser.username,
+          content,
+          created_at: new Date().toISOString(),
+          pending: true
+        };
+        appendMessage(msg, true, true);
+        scrollToBottom();
+        pendingMessages.set(tempId, { content, groupId: selectedGroupId });
+        sendPendingMessage(tempId);
+      } else {
+        const msg = {
+          id: tempId,
+          sender_id: currentUser.id,
+          receiver_id: selectedUserId,
+          content,
+          created_at: new Date().toISOString(),
+          pending: true
+        };
+        appendMessage(msg);
+        scrollToBottom();
+        updateUserPreview(selectedUserId, content);
+        pendingMessages.set(tempId, { content, receiverId: selectedUserId });
+        sendPendingMessage(tempId);
+      }
+    };
+    reader.readAsDataURL(file);
+
+    // Reset file input so same file can be selected again
+    fileInput.value = '';
+  });
+}
 
 // ---- BLOCK / UNBLOCK ----
 
@@ -1104,6 +1394,11 @@ function updateBlockButton() {
   if (!btn || !selectedUserId) return;
   // Hide block button for bot
   if (userRoles[selectedUserId] === 'bot') {
+    btn.classList.add('hidden');
+    return;
+  }
+  // Hide block button in group chat
+  if (selectedGroupId) {
     btn.classList.add('hidden');
     return;
   }
@@ -1170,6 +1465,214 @@ $('#blocked-users-btn').addEventListener('click', () => {
 $('#close-blocked-section').addEventListener('click', () => {
   $('#blocked-users-section').classList.add('hidden');
 });
+
+// ---- GROUP CHAT ----
+
+async function loadGroups() {
+  try {
+    const res = await authFetch('/api/groups');
+    if (!res.ok) return;
+    const groups = await res.json();
+    renderGroupList(groups);
+  } catch (err) {
+    if (err.message !== 'Unauthorized') console.warn('Failed to load groups');
+  }
+}
+
+function renderGroupList(groups) {
+  // Remove existing group list if any
+  let groupSection = $('#group-list-section');
+  if (!groupSection) {
+    // Create group section in sidebar, after user-list
+    groupSection = document.createElement('div');
+    groupSection.id = 'group-list-section';
+    groupSection.className = 'group-list-section';
+    const userList = $('#user-list');
+    userList.parentNode.insertBefore(groupSection, userList.nextSibling);
+  }
+
+  if (!groups || groups.length === 0) {
+    groupSection.innerHTML = '<div class="group-list-header"><span>Nhóm chat</span></div><p class="empty-state" style="padding:8px 16px;font-size:13px;">Chưa có nhóm nào</p>';
+    return;
+  }
+
+  groupSection.innerHTML = '<div class="group-list-header"><span>Nhóm chat</span></div>';
+  const list = document.createElement('div');
+  list.id = 'group-list';
+  list.className = 'group-list';
+
+  groups.forEach(group => {
+    const item = document.createElement('div');
+    item.className = 'group-item user-item' + (group.id === selectedGroupId ? ' active' : '');
+    item.dataset.groupId = group.id;
+    item.dataset.groupName = group.name;
+
+    const avatar = document.createElement('span');
+    avatar.className = 'user-avatar group-avatar';
+    avatar.style.background = getColor(group.name);
+    avatar.textContent = '👥';
+
+    const info = document.createElement('div');
+    info.className = 'user-item-info';
+    info.innerHTML = `
+      <div class="user-item-name">${escapeHtml(group.name)}</div>
+      <div class="user-item-preview">${group.member_count || ''} thành viên</div>
+    `;
+
+    item.appendChild(avatar);
+    item.appendChild(info);
+    item.addEventListener('click', () => selectGroup(group.id, group.name));
+    list.appendChild(item);
+  });
+
+  groupSection.appendChild(list);
+}
+
+async function selectGroup(groupId, name) {
+  selectedGroupId = groupId;
+  selectedUserId = null; // Deselect DM
+
+  // Deselect users
+  $$('.user-item').forEach(item => item.classList.remove('active'));
+  // Select group
+  $$('.group-item').forEach(item => {
+    item.classList.toggle('active', parseInt(item.dataset.groupId) === groupId);
+  });
+
+  $('#no-chat').classList.add('hidden');
+  $('#chat-box').classList.remove('hidden');
+  $('#chat-with-name').textContent = name;
+
+  // Set group avatar
+  const chatAvatar = $('#chat-avatar');
+  chatAvatar.style.background = getColor(name);
+  chatAvatar.textContent = '👥';
+  chatAvatar.className = 'user-avatar';
+
+  const statusEl = $('#chat-status');
+  statusEl.textContent = 'Nhóm chat';
+  statusEl.className = 'status-text';
+
+  // Hide block button for groups
+  const blockBtn = $('#block-btn');
+  if (blockBtn) blockBtn.classList.add('hidden');
+
+  // Mobile: hide sidebar and show chat
+  if (document.body.classList.contains('mobile')) {
+    $('.sidebar').classList.add('sidebar-hidden');
+    $('.chat-area').classList.add('chat-visible');
+  }
+
+  $('#messages').innerHTML = '';
+
+  try {
+    const res = await authFetch(`/api/groups/${groupId}/messages`);
+    const messages = await res.json();
+
+    let lastDate = '';
+    messages.forEach(msg => {
+      const msgDate = formatDate(msg.created_at);
+      if (msgDate !== lastDate) {
+        lastDate = msgDate;
+        const divider = document.createElement('div');
+        divider.className = 'date-divider';
+        divider.innerHTML = `<span>${msgDate}</span>`;
+        $('#messages').appendChild(divider);
+      }
+      appendMessage(msg, false, true);
+    });
+    scrollToBottom(false);
+  } catch (err) {
+    if (err.message !== 'Unauthorized') console.warn('Failed to load group messages');
+  }
+
+  $('#message-input').focus();
+}
+
+function createGroup() {
+  // Build modal
+  const existing = $('#create-group-modal');
+  if (existing) existing.remove();
+
+  const modal = document.createElement('div');
+  modal.id = 'create-group-modal';
+  modal.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:9999;display:flex;align-items:center;justify-content:center;';
+
+  const dialog = document.createElement('div');
+  dialog.style.cssText = 'background:var(--bg-primary, #fff);border-radius:12px;padding:24px;min-width:300px;max-width:400px;max-height:80vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,0.2);';
+
+  let userCheckboxes = '';
+  allUsers.forEach(u => {
+    if (u.id !== currentUser.id) {
+      const displayName = u.nickname || u.display_name || u.username;
+      userCheckboxes += `
+        <label style="display:flex;align-items:center;gap:8px;padding:6px 0;cursor:pointer;">
+          <input type="checkbox" value="${u.id}" class="group-user-cb" />
+          <span>${escapeHtml(displayName)}</span>
+        </label>
+      `;
+    }
+  });
+
+  dialog.innerHTML = `
+    <h3 style="margin:0 0 16px;font-size:18px;">Tạo nhóm chat</h3>
+    <input type="text" id="group-name-input" placeholder="Tên nhóm..." style="width:100%;padding:10px;border:1px solid var(--border-color, #ddd);border-radius:8px;margin-bottom:12px;background:var(--bg-secondary, #f5f5f5);color:var(--text-primary, #333);box-sizing:border-box;" />
+    <div style="margin-bottom:12px;font-weight:600;font-size:14px;">Chọn thành viên:</div>
+    <div style="max-height:200px;overflow-y:auto;margin-bottom:16px;">
+      ${userCheckboxes || '<p style="color:#999;font-size:13px;">Không có người dùng khả dụng</p>'}
+    </div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;">
+      <button id="cancel-group-btn" style="padding:8px 16px;border:1px solid var(--border-color, #ddd);border-radius:8px;background:transparent;cursor:pointer;color:var(--text-primary, #333);">Hủy</button>
+      <button id="confirm-group-btn" style="padding:8px 16px;border:none;border-radius:8px;background:var(--primary, #5b5ea6);color:#fff;cursor:pointer;">Tạo nhóm</button>
+    </div>
+  `;
+
+  modal.appendChild(dialog);
+  document.body.appendChild(modal);
+
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) modal.remove();
+  });
+
+  dialog.querySelector('#cancel-group-btn').addEventListener('click', () => modal.remove());
+
+  dialog.querySelector('#confirm-group-btn').addEventListener('click', async () => {
+    const name = dialog.querySelector('#group-name-input').value.trim();
+    if (!name) {
+      alert('Vui lòng nhập tên nhóm');
+      return;
+    }
+
+    const selectedIds = [];
+    dialog.querySelectorAll('.group-user-cb:checked').forEach(cb => {
+      selectedIds.push(parseInt(cb.value));
+    });
+
+    if (selectedIds.length === 0) {
+      alert('Vui lòng chọn ít nhất 1 thành viên');
+      return;
+    }
+
+    try {
+      const res = await authFetch('/api/groups', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, memberIds: selectedIds })
+      });
+      if (res.ok) {
+        const group = await res.json();
+        modal.remove();
+        loadGroups();
+        selectGroup(group.id, group.name);
+      } else {
+        const data = await res.json();
+        alert(data.error || 'Không thể tạo nhóm');
+      }
+    } catch (err) {
+      if (err.message !== 'Unauthorized') alert('Lỗi kết nối server');
+    }
+  });
+}
 
 // ---- ADMIN PANEL ----
 
@@ -1325,9 +1828,79 @@ async function adminDeleteUser(userId, username) {
   } catch (err) { if (err.message !== 'Unauthorized') alert('Lỗi kết nối server'); }
 }
 
+// ---- MOBILE RESPONSIVE ----
+
+function initMobile() {
+  // Add mobile class based on viewport
+  if (window.innerWidth <= 768) {
+    document.body.classList.add('mobile');
+  }
+  window.addEventListener('resize', () => {
+    document.body.classList.toggle('mobile', window.innerWidth <= 768);
+  });
+
+  // Create hamburger button (inserted into chat-area header when mobile)
+  const hamburger = document.createElement('button');
+  hamburger.id = 'mobile-hamburger';
+  hamburger.className = 'icon-btn mobile-only-btn';
+  hamburger.title = 'Menu';
+  hamburger.innerHTML = `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>`;
+  hamburger.addEventListener('click', () => {
+    $('.sidebar').classList.remove('sidebar-hidden');
+    $('.chat-area').classList.remove('chat-visible');
+  });
+
+  // Insert hamburger into no-chat area
+  const noChat = $('#no-chat');
+  if (noChat) {
+    const noChatHamburger = hamburger.cloneNode(true);
+    noChatHamburger.addEventListener('click', () => {
+      $('.sidebar').classList.remove('sidebar-hidden');
+      $('.chat-area').classList.remove('chat-visible');
+    });
+    noChatHamburger.style.cssText = 'position:absolute;top:12px;left:12px;';
+    noChat.style.position = 'relative';
+    noChat.appendChild(noChatHamburger);
+  }
+
+  // Create back button in chat header
+  const backBtn = document.createElement('button');
+  backBtn.id = 'mobile-back-btn';
+  backBtn.className = 'icon-btn mobile-only-btn';
+  backBtn.title = 'Quay lại';
+  backBtn.innerHTML = `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>`;
+  backBtn.addEventListener('click', () => {
+    $('.sidebar').classList.remove('sidebar-hidden');
+    $('.chat-area').classList.remove('chat-visible');
+  });
+
+  // Insert back button at the start of chat header
+  const chatHeader = $('.chat-header');
+  if (chatHeader) {
+    chatHeader.insertBefore(backBtn, chatHeader.firstChild);
+  }
+
+  // Create "+" button for creating groups near search box
+  const searchBox = $('.search-box');
+  if (searchBox) {
+    const createGroupBtn = document.createElement('button');
+    createGroupBtn.id = 'create-group-btn';
+    createGroupBtn.className = 'icon-btn';
+    createGroupBtn.title = 'Tạo nhóm chat';
+    createGroupBtn.innerHTML = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>`;
+    createGroupBtn.style.cssText = 'flex-shrink:0;margin-left:8px;';
+    createGroupBtn.addEventListener('click', () => createGroup());
+    searchBox.style.display = 'flex';
+    searchBox.style.alignItems = 'center';
+    searchBox.appendChild(createGroupBtn);
+  }
+}
+
 // ---- INIT ----
 
 initEmojiPicker();
 initEmojiSuggest();
+initImageUpload();
 setInterval(loadUsers, 10000);
 checkAuth();
+initMobile();

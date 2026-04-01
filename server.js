@@ -72,6 +72,37 @@ async function initDB() {
     )
   `);
 
+  // --- Read Receipts columns ---
+  await pool.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS is_read INTEGER DEFAULT 0`);
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen TIMESTAMPTZ`);
+
+  // --- Group Chat tables ---
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS groups (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL,
+      created_by INTEGER NOT NULL REFERENCES users(id),
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS group_members (
+      group_id INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+      user_id INTEGER NOT NULL REFERENCES users(id),
+      joined_at TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (group_id, user_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS group_messages (
+      id SERIAL PRIMARY KEY,
+      group_id INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+      sender_id INTEGER NOT NULL REFERENCES users(id),
+      content TEXT NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_group_messages ON group_messages(group_id);
+  `);
+
   // Promote first user to admin if none exists
   const { rows: admins } = await pool.query("SELECT id FROM users WHERE role = 'admin' LIMIT 1");
   if (admins.length === 0) {
@@ -140,7 +171,7 @@ const sessionMiddleware = session({
 
 app.set('trust proxy', 1);
 app.use(sessionMiddleware);
-app.use(express.json());
+app.use(express.json({ limit: '2mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 // Auth tokens
@@ -261,14 +292,14 @@ app.get('/api/me', async (req, res) => {
 
 app.get('/api/users', requireAuth, async (req, res) => {
   const { rows: users } = await pool.query(`
-    SELECT u.id, u.username, u.display_name, u.role,
+    SELECT u.id, u.username, u.display_name, u.role, u.last_seen,
       n.nickname
     FROM users u
     LEFT JOIN nicknames n ON n.target_id = u.id AND n.user_id = $1
     WHERE u.id != $1 AND u.is_banned = 0 AND u.role != 'bot'
       AND u.id NOT IN (SELECT blocked_id FROM blocked_users WHERE user_id = $1)
   `, [req.userId]);
-  users.unshift({ id: BOT_ID, username: BOT_USERNAME, display_name: 'AI Bot', role: 'bot', nickname: null });
+  users.unshift({ id: BOT_ID, username: BOT_USERNAME, display_name: 'AI Bot', role: 'bot', nickname: null, last_seen: null });
   res.json(users);
 });
 
@@ -304,6 +335,17 @@ app.get('/api/messages/:userId', requireAuth, async (req, res) => {
   }
 
   res.json(messages);
+});
+
+// --- Read Receipts Route ---
+
+app.post('/api/messages/read/:userId', requireAuth, async (req, res) => {
+  const senderId = parseInt(req.params.userId);
+  await pool.query(
+    'UPDATE messages SET is_read = 1 WHERE sender_id = $1 AND receiver_id = $2 AND is_read = 0',
+    [senderId, req.userId]
+  );
+  res.json({ ok: true });
 });
 
 // --- BLOCK ROUTES ---
@@ -353,6 +395,107 @@ app.post('/api/nickname/:userId', requireAuth, async (req, res) => {
 app.delete('/api/nickname/:userId', requireAuth, async (req, res) => {
   const targetId = parseInt(req.params.userId);
   await pool.query('DELETE FROM nicknames WHERE user_id = $1 AND target_id = $2', [req.userId, targetId]);
+  res.json({ ok: true });
+});
+
+// --- GROUP CHAT ROUTES ---
+
+app.post('/api/groups', requireAuth, async (req, res) => {
+  const { name, memberIds } = req.body;
+  if (!name || !name.trim()) return res.status(400).json({ error: 'Tên nhóm không được để trống' });
+
+  const { rows } = await pool.query(
+    'INSERT INTO groups (name, created_by) VALUES ($1, $2) RETURNING id, name, created_by, created_at',
+    [name.trim(), req.userId]
+  );
+  const group = rows[0];
+
+  // Add creator as member
+  await pool.query('INSERT INTO group_members (group_id, user_id) VALUES ($1, $2)', [group.id, req.userId]);
+
+  // Add other members
+  if (memberIds && Array.isArray(memberIds)) {
+    for (const memberId of memberIds) {
+      if (memberId !== req.userId) {
+        await pool.query(
+          'INSERT INTO group_members (group_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+          [group.id, memberId]
+        );
+      }
+    }
+  }
+
+  res.json(group);
+});
+
+app.get('/api/groups', requireAuth, async (req, res) => {
+  const { rows } = await pool.query(`
+    SELECT g.id, g.name, g.created_by, g.created_at
+    FROM groups g
+    JOIN group_members gm ON gm.group_id = g.id
+    WHERE gm.user_id = $1
+    ORDER BY g.created_at DESC
+  `, [req.userId]);
+  res.json(rows);
+});
+
+app.get('/api/groups/:groupId/messages', requireAuth, async (req, res) => {
+  const groupId = parseInt(req.params.groupId);
+
+  // Verify user is a member
+  const { rows: membership } = await pool.query(
+    'SELECT 1 FROM group_members WHERE group_id = $1 AND user_id = $2',
+    [groupId, req.userId]
+  );
+  if (membership.length === 0) return res.status(403).json({ error: 'Bạn không phải thành viên nhóm này' });
+
+  const { rows: messages } = await pool.query(`
+    SELECT gm.id, gm.group_id, gm.sender_id, gm.content, gm.created_at,
+      u.username as sender_name, u.display_name as sender_display_name
+    FROM group_messages gm
+    JOIN users u ON gm.sender_id = u.id
+    WHERE gm.group_id = $1
+    ORDER BY gm.created_at ASC
+    LIMIT 200
+  `, [groupId]);
+
+  res.json(messages);
+});
+
+app.post('/api/groups/:groupId/members', requireAuth, async (req, res) => {
+  const groupId = parseInt(req.params.groupId);
+  const { userId } = req.body;
+  if (!userId) return res.status(400).json({ error: 'Thiếu userId' });
+
+  // Verify requester is a member
+  const { rows: membership } = await pool.query(
+    'SELECT 1 FROM group_members WHERE group_id = $1 AND user_id = $2',
+    [groupId, req.userId]
+  );
+  if (membership.length === 0) return res.status(403).json({ error: 'Bạn không phải thành viên nhóm này' });
+
+  await pool.query(
+    'INSERT INTO group_members (group_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+    [groupId, userId]
+  );
+  res.json({ ok: true });
+});
+
+app.delete('/api/groups/:groupId/members/:userId', requireAuth, async (req, res) => {
+  const groupId = parseInt(req.params.groupId);
+  const targetUserId = parseInt(req.params.userId);
+
+  // Verify requester is a member
+  const { rows: membership } = await pool.query(
+    'SELECT 1 FROM group_members WHERE group_id = $1 AND user_id = $2',
+    [groupId, req.userId]
+  );
+  if (membership.length === 0) return res.status(403).json({ error: 'Bạn không phải thành viên nhóm này' });
+
+  await pool.query(
+    'DELETE FROM group_members WHERE group_id = $1 AND user_id = $2',
+    [groupId, targetUserId]
+  );
   res.json({ ok: true });
 });
 
@@ -410,6 +553,8 @@ app.delete('/api/admin/users/:userId', requireAdmin, async (req, res) => {
   await pool.query('DELETE FROM messages WHERE sender_id = $1 OR receiver_id = $1', [targetId]);
   await pool.query('DELETE FROM blocked_users WHERE user_id = $1 OR blocked_id = $1', [targetId]);
   await pool.query('DELETE FROM nicknames WHERE user_id = $1 OR target_id = $1', [targetId]);
+  await pool.query('DELETE FROM group_members WHERE user_id = $1', [targetId]);
+  await pool.query('DELETE FROM group_messages WHERE sender_id = $1', [targetId]);
   await pool.query('DELETE FROM users WHERE id = $1', [targetId]);
 
   const sockets = onlineUsers.get(targetId);
@@ -440,6 +585,15 @@ io.on('connection', async (socket) => {
 
   if (!onlineUsers.has(userId)) onlineUsers.set(userId, new Set());
   onlineUsers.get(userId).add(socket.id);
+
+  // Join socket rooms for all user's groups
+  const { rows: myGroups } = await pool.query(
+    'SELECT group_id FROM group_members WHERE user_id = $1',
+    [userId]
+  );
+  for (const g of myGroups) {
+    socket.join(`group_${g.group_id}`);
+  }
 
   function broadcastOnline() {
     io.emit('online_users', Array.from(onlineUsers.keys()));
@@ -548,11 +702,67 @@ io.on('connection', async (socket) => {
     if (receiverSockets) receiverSockets.forEach(sid => io.to(sid).emit('user_typing', { userId, username }));
   });
 
-  socket.on('disconnect', () => {
+  // --- Read Receipts socket event ---
+  socket.on('mark_read', async (data) => {
+    const { senderId } = data;
+    if (!senderId) return;
+
+    await pool.query(
+      'UPDATE messages SET is_read = 1 WHERE sender_id = $1 AND receiver_id = $2 AND is_read = 0',
+      [senderId, userId]
+    );
+
+    // Notify the sender that their messages were read
+    const senderSockets = onlineUsers.get(senderId);
+    if (senderSockets) {
+      senderSockets.forEach(sid => io.to(sid).emit('messages_read', { readBy: userId }));
+    }
+  });
+
+  // --- Group Chat socket event ---
+  socket.on('send_group_message', async (data) => {
+    const { groupId, content } = data;
+    if (!groupId || !content || !content.trim()) return;
+
+    // Verify sender is a member
+    const { rows: membership } = await pool.query(
+      'SELECT 1 FROM group_members WHERE group_id = $1 AND user_id = $2',
+      [groupId, userId]
+    );
+    if (membership.length === 0) return;
+
+    const sanitized = content.trim().slice(0, 2000);
+    const { rows: inserted } = await pool.query(
+      'INSERT INTO group_messages (group_id, sender_id, content) VALUES ($1, $2, $3) RETURNING id, created_at',
+      [groupId, userId, sanitized]
+    );
+
+    const { rows: senderRows } = await pool.query('SELECT display_name FROM users WHERE id = $1', [userId]);
+    const senderDisplayName = senderRows[0]?.display_name || null;
+
+    const message = {
+      id: inserted[0].id,
+      group_id: groupId,
+      sender_id: userId,
+      sender_name: username,
+      sender_display_name: senderDisplayName,
+      content: sanitized,
+      created_at: inserted[0].created_at
+    };
+
+    // Emit to all online group members
+    io.to(`group_${groupId}`).emit('new_group_message', message);
+  });
+
+  socket.on('disconnect', async () => {
     const sockets = onlineUsers.get(userId);
     if (sockets) {
       sockets.delete(socket.id);
-      if (sockets.size === 0) onlineUsers.delete(userId);
+      if (sockets.size === 0) {
+        onlineUsers.delete(userId);
+        // Save last_seen when user fully disconnects
+        await pool.query('UPDATE users SET last_seen = NOW() WHERE id = $1', [userId]);
+      }
     }
     broadcastOnline();
   });
