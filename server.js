@@ -224,49 +224,68 @@ function stripImagesFromHistory(history) {
 
 async function getBotReply(userMessage, imageData, userId) {
   if (!geminiModel) return 'Xin lỗi, AI Bot chưa được kích hoạt 🔑';
+
+  // Get or create conversation for this user
+  if (!botConversations.has(userId)) {
+    botConversations.set(userId, { history: [], lastActivity: Date.now() });
+  }
+  const conv = botConversations.get(userId);
+
+  // Check timeout - reset if stale
+  if (Date.now() - conv.lastActivity > BOT_HISTORY_TIMEOUT) {
+    conv.history = [];
+  }
+  conv.lastActivity = Date.now();
+
+  // Build current message parts (text only for history, image only for current call)
+  const textParts = [{ text: userMessage || 'Hãy mô tả hình ảnh này.' }];
+  const sendParts = [...textParts];
+  if (imageData) {
+    sendParts.push({ inlineData: { mimeType: imageData.mimeType, data: imageData.base64 } });
+  }
+
+  // Try with conversation history first
   try {
-    // Get or create conversation for this user
-    if (!botConversations.has(userId)) {
-      botConversations.set(userId, { history: [], lastActivity: Date.now() });
-    }
-    const conv = botConversations.get(userId);
-
-    // Check timeout - reset if stale
-    if (Date.now() - conv.lastActivity > BOT_HISTORY_TIMEOUT) {
-      conv.history = [];
-    }
-    conv.lastActivity = Date.now();
-
-    // Build current message parts
-    const currentParts = [];
-    if (imageData) {
-      currentParts.push({ text: userMessage || 'Hãy mô tả hình ảnh này.' });
-      currentParts.push({ inlineData: { mimeType: imageData.mimeType, data: imageData.base64 } });
-    } else {
-      currentParts.push({ text: userMessage });
-    }
-
-    // Strip images from old history to save memory, keep text descriptions
     const sanitizedHistory = stripImagesFromHistory(conv.history);
-
-    // Use Gemini chat API with history
     const chat = geminiModel.startChat({ history: sanitizedHistory });
-    const result = await chat.sendMessage(currentParts);
+    const result = await chat.sendMessage(sendParts);
     const reply = result.response.text().slice(0, 4000);
 
-    // Store current user message and bot response in history
-    conv.history.push({ role: 'user', parts: currentParts });
+    // Store ONLY text parts in history (no base64 image data)
+    conv.history.push({ role: 'user', parts: textParts });
     conv.history.push({ role: 'model', parts: [{ text: reply }] });
 
-    // Trim history to max entries (keep most recent)
+    // If image was sent, add a note about it in the user's history text
+    if (imageData) {
+      conv.history[conv.history.length - 2] = {
+        role: 'user',
+        parts: [{ text: (userMessage || 'Hãy mô tả hình ảnh này.') + '\n[Người dùng đã gửi kèm một hình ảnh]' }]
+      };
+    }
+
+    // Trim history
     while (conv.history.length > BOT_MAX_HISTORY) {
       conv.history.shift();
     }
 
     return reply;
   } catch (err) {
-    console.error('Gemini error:', err.message);
-    return 'Ối, mình bị lỗi rồi 😵 Thử lại sau nhé!';
+    console.error('Gemini error with history:', err.message);
+    // Reset history on error to prevent cascading failures
+    conv.history = [];
+
+    // Fallback: try without history
+    try {
+      const result = await geminiModel.generateContent(sendParts);
+      const reply = result.response.text().slice(0, 4000);
+      // Start fresh history with this exchange
+      conv.history.push({ role: 'user', parts: textParts });
+      conv.history.push({ role: 'model', parts: [{ text: reply }] });
+      return reply;
+    } catch (err2) {
+      console.error('Gemini fallback error:', err2.message);
+      return 'Ối, mình bị lỗi rồi 😵 Thử lại sau nhé!';
+    }
   }
 }
 
@@ -922,7 +941,7 @@ io.on('connection', async (socket) => {
         };
         const userSockets = onlineUsers.get(userId);
         if (userSockets) userSockets.forEach(sid => io.to(sid).emit('new_message', botMessage));
-      });
+      }).catch(err => console.error('Bot reply DB error:', err.message));
     } else {
       const receiverSockets = onlineUsers.get(receiverId);
       if (receiverSockets) receiverSockets.forEach(sid => io.to(sid).emit('new_message', message));

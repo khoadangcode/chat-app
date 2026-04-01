@@ -963,7 +963,7 @@ function createMessageEl(msg, animate = true, isGroupMsg = false) {
     const dataUrl = msg.content.substring(7);
     el.innerHTML = `${senderLabel}${replyHtml}<img src="${dataUrl}" class="chat-image" alt="Hình ảnh" onclick="openImagePreview(this.src)" /><span class="time">${editedBadge}${formatTime(msg.created_at)}${status}</span>`;
   } else if (isSticker) {
-    const stickerEmoji = msg.content.replace('[sticker]', '').trim();
+    const stickerEmoji = escapeHtml(msg.content.replace('[sticker]', '').trim());
     el.innerHTML = `${senderLabel}${replyHtml}<span class="sticker-display">${stickerEmoji}</span><span class="time">${editedBadge}${formatTime(msg.created_at)}${status}</span>`;
   } else {
     el.innerHTML = `${senderLabel}${replyHtml}<span class="msg-content">${renderMessageContent(msg.content)}</span><span class="time">${editedBadge}${formatTime(msg.created_at)}${status}</span>`;
