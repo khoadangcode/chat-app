@@ -5,18 +5,24 @@ const $$ = (sel) => document.querySelectorAll(sel);
 let currentUser = null;
 let authToken = localStorage.getItem('authToken');
 let selectedUserId = null;
-let selectedGroupId = null; // Group chat state
+let selectedGroupId = null;
 let socket = null;
 let onlineUserIds = [];
 let unreadCounts = {};
 let blockedUserIds = new Set();
-let userRoles = {}; // userId -> role
-let allUsers = []; // Cache for group creation
-let lastSeenData = {}; // userId -> last_seen timestamp
+let userRoles = {};
+let allUsers = [];
+let lastSeenData = {};
+let replyingTo = null; // { id, senderName, content }
 
 // Message queue for offline/pending messages
 const pendingMessages = new Map();
 let nextTempId = -1;
+
+// Pagination state
+let loadingOlder = false;
+let hasMoreMessages = true;
+let oldestMessageId = null;
 
 // ---- DARK MODE ----
 function initTheme() {
@@ -47,7 +53,7 @@ $('#theme-toggle')?.addEventListener('click', toggleTheme);
 
 const COLORS = ['#5b5ea6','#e07a5f','#3d85c6','#81b29a','#f2a65a','#e76f51','#457b9d','#8338ec'];
 
-// ---- NOTIFICATION SOUND ----
+// ---- NOTIFICATION SOUND & BROWSER NOTIFICATIONS ----
 
 const playNotifSound = (() => {
   let ctx;
@@ -67,6 +73,22 @@ const playNotifSound = (() => {
     } catch {}
   };
 })();
+
+function requestNotificationPermission() {
+  if ('Notification' in window && Notification.permission === 'default') {
+    Notification.requestPermission();
+  }
+}
+
+function showBrowserNotification(title, body) {
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  if (document.hasFocus()) return;
+  try {
+    const n = new Notification(title, { body: body.slice(0, 100), icon: '/favicon.ico' });
+    n.onclick = () => { window.focus(); n.close(); };
+    setTimeout(() => n.close(), 5000);
+  } catch {}
+}
 
 // ---- EMOJI DATA ----
 
@@ -118,6 +140,14 @@ const STICKERS = [
 
 const REACTION_EMOJIS = ['❤️','😂','👍','😮','😢'];
 
+const FILE_ICONS = {
+  'pdf': '📄', 'doc': '📝', 'docx': '📝', 'xls': '📊', 'xlsx': '📊',
+  'ppt': '📊', 'pptx': '📊', 'zip': '📦', 'rar': '📦', '7z': '📦',
+  'txt': '📃', 'csv': '📃', 'json': '📃', 'xml': '📃',
+  'mp3': '🎵', 'wav': '🎵', 'mp4': '🎬', 'avi': '🎬', 'mov': '🎬',
+  'default': '📎'
+};
+
 // ---- HELPERS ----
 
 function getColor(name) {
@@ -126,17 +156,33 @@ function getColor(name) {
   return COLORS[Math.abs(hash) % COLORS.length];
 }
 
-function createAvatar(name, isOnline) {
+function createAvatar(name, isOnline, avatarUrl) {
   const el = document.createElement('span');
   el.className = 'user-avatar' + (isOnline ? ' online' : '');
-  el.style.background = getColor(name);
-  el.textContent = name.charAt(0).toUpperCase();
+  if (avatarUrl) {
+    el.style.backgroundImage = `url(${avatarUrl})`;
+    el.style.backgroundSize = 'cover';
+    el.style.backgroundPosition = 'center';
+    el.textContent = '';
+  } else {
+    el.style.background = getColor(name);
+    el.textContent = name.charAt(0).toUpperCase();
+  }
   return el;
 }
 
-function setStaticAvatar(el, name, isOnline) {
-  el.style.background = getColor(name);
-  el.textContent = name.charAt(0).toUpperCase();
+function setStaticAvatar(el, name, isOnline, avatarUrl) {
+  if (avatarUrl) {
+    el.style.backgroundImage = `url(${avatarUrl})`;
+    el.style.backgroundSize = 'cover';
+    el.style.backgroundPosition = 'center';
+    el.style.backgroundColor = 'transparent';
+    el.textContent = '';
+  } else {
+    el.style.backgroundImage = '';
+    el.style.background = getColor(name);
+    el.textContent = name.charAt(0).toUpperCase();
+  }
   el.className = 'user-avatar' + (isOnline ? ' online' : '');
 }
 
@@ -161,8 +207,6 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
-// ---- LAST SEEN HELPER ----
-
 function formatLastSeen(lastSeenStr) {
   if (!lastSeenStr) return 'Offline';
   const lastSeen = new Date(lastSeenStr);
@@ -171,12 +215,26 @@ function formatLastSeen(lastSeenStr) {
   const diffMin = Math.floor(diffMs / 60000);
   const diffHour = Math.floor(diffMs / 3600000);
   const diffDay = Math.floor(diffMs / 86400000);
-
   if (diffMin < 1) return 'Online vừa mới';
   if (diffMin < 60) return `Online ${diffMin} phút trước`;
   if (diffHour < 24) return `Online ${diffHour} giờ trước`;
   if (diffDay < 7) return `Online ${diffDay} ngày trước`;
   return 'Offline';
+}
+
+function getFileExt(name) {
+  return (name || '').split('.').pop().toLowerCase();
+}
+
+function getFileIcon(name) {
+  const ext = getFileExt(name);
+  return FILE_ICONS[ext] || FILE_ICONS['default'];
+}
+
+function formatFileSize(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
 }
 
 // ---- AUTH HELPERS ----
@@ -299,7 +357,7 @@ function enterChat(user) {
 
   const myName = user.display_name || user.username;
   $('#my-username').textContent = myName;
-  setStaticAvatar($('#my-avatar'), myName, true);
+  setStaticAvatar($('#my-avatar'), myName, true, user.avatar);
 
   const adminBtn = $('#admin-btn');
   if (user.role === 'admin') {
@@ -308,6 +366,7 @@ function enterChat(user) {
     adminBtn.classList.add('hidden');
   }
 
+  requestNotificationPermission();
   connectSocket();
   loadBlockedUsers();
   loadUsers();
@@ -329,17 +388,13 @@ function connectSocket() {
   socket.on('connect', () => {
     hideConnectionError();
     loadUsers();
-    // Retry all pending messages
     flushPendingMessages();
   });
 
-  socket.on('disconnect', () => {
-    // Don't show error immediately - wait for reconnect attempts
-  });
+  socket.on('disconnect', () => {});
 
   let reconnectShown = false;
   socket.on('reconnect_attempt', (attempt) => {
-    // Only show after 2 failed attempts (not on brief hiccups)
     if (attempt >= 2 && !reconnectShown) {
       showConnectionError('Đang kết nối lại...');
       reconnectShown = true;
@@ -353,8 +408,7 @@ function connectSocket() {
     if (selectedUserId) {
       selectUser(selectedUserId, $('#chat-with-name').textContent);
     } else if (selectedGroupId) {
-      const name = $('#chat-with-name').textContent;
-      selectGroup(selectedGroupId, name);
+      selectGroup(selectedGroupId, $('#chat-with-name').textContent);
     }
   });
 
@@ -378,20 +432,17 @@ function connectSocket() {
   });
 
   socket.on('new_message', (msg) => {
-    // Skip if this is our own message (already shown optimistically)
     if (msg.sender_id === currentUser.id) {
-      // Check if we already have this as a pending message shown
       const existing = document.querySelector(`[data-msg-id="${msg.id}"]`);
-      if (existing) return; // Already confirmed
-      // Check if any pending message matches this content (duplicate prevention)
+      if (existing) return;
       const pendingEl = document.querySelector('.message.pending');
-      if (pendingEl) return; // We showed it optimistically
-      // Otherwise show it (sent from another tab/device)
+      if (pendingEl) return;
     }
 
-    // Play notification sound for messages from others
     if (msg.sender_id !== currentUser.id) {
       playNotifSound();
+      const senderName = msg.sender_display_name || msg.sender_name || 'Người dùng';
+      showBrowserNotification(senderName, msg.content.startsWith('[') ? 'Gửi một tệp' : msg.content);
     }
 
     if (
@@ -423,17 +474,12 @@ function connectSocket() {
     alert(msg);
   });
 
-  // Listen for reaction updates
   socket.on('reaction_updated', (data) => {
-    // data: { messageId, reactions: [{ emoji, user_id, username }, ...] }
     updateMessageReactions(data.messageId, data.reactions);
   });
 
-  // ---- READ RECEIPTS socket listener ----
   socket.on('messages_read', (data) => {
-    // data: { readerId } - the user who read our messages
-    const readerId = data.readerId;
-    // If we're currently chatting with this user, update all sent messages to "read"
+    const readerId = data.readBy;
     if (readerId === selectedUserId) {
       $$('.message.sent .msg-status').forEach(statusEl => {
         if (statusEl.textContent === '✓') {
@@ -444,15 +490,13 @@ function connectSocket() {
     }
   });
 
-  // ---- GROUP CHAT socket listener ----
   socket.on('new_group_message', (msg) => {
-    // msg: { id, group_id, sender_id, sender_name, content, created_at }
     if (msg.sender_id !== currentUser.id) {
       playNotifSound();
+      showBrowserNotification('Nhóm chat', `${msg.sender_name}: ${msg.content.startsWith('[') ? 'Gửi một tệp' : msg.content}`);
     }
 
     if (selectedGroupId === msg.group_id) {
-      // Skip if we sent it optimistically
       if (msg.sender_id === currentUser.id) {
         const existing = document.querySelector(`[data-msg-id="${msg.id}"]`);
         if (existing) return;
@@ -462,6 +506,35 @@ function connectSocket() {
       appendMessage(msg, true, true);
       scrollToBottom();
     }
+  });
+
+  // --- Edit/Delete listeners ---
+  socket.on('message_edited', (data) => {
+    const el = document.querySelector(`[data-msg-id="${data.messageId}"]`);
+    if (!el) return;
+    const contentEl = el.querySelector('.msg-content');
+    if (contentEl) contentEl.textContent = data.content;
+    // Add edited badge
+    if (!el.querySelector('.edited-badge')) {
+      const badge = document.createElement('span');
+      badge.className = 'edited-badge';
+      badge.textContent = '(đã chỉnh sửa)';
+      const timeEl = el.querySelector('.time');
+      if (timeEl) timeEl.insertBefore(badge, timeEl.firstChild);
+    }
+  });
+
+  socket.on('message_deleted', (data) => {
+    const el = document.querySelector(`[data-msg-id="${data.messageId}"]`);
+    if (!el) return;
+    el.classList.add('deleted');
+    const contentEl = el.querySelector('.msg-content');
+    if (contentEl) contentEl.innerHTML = '<em>Tin nhắn đã bị xóa</em>';
+    // Remove action buttons
+    const actions = el.querySelector('.msg-actions');
+    if (actions) actions.remove();
+    const replyQuote = el.querySelector('.reply-quote');
+    if (replyQuote) replyQuote.remove();
   });
 }
 
@@ -478,9 +551,8 @@ function sendPendingMessage(tempId) {
   if (!pending || !socket || !socket.connected) return;
 
   if (pending.groupId) {
-    // Group message
     socket.emit('send_group_message',
-      { groupId: pending.groupId, content: pending.content, tempId },
+      { groupId: pending.groupId, content: pending.content, tempId, replyTo: pending.replyTo, fileName: pending.fileName, fileType: pending.fileType },
       (ack) => {
         if (ack && ack.success) {
           const el = document.querySelector(`[data-msg-id="${tempId}"]`);
@@ -495,12 +567,10 @@ function sendPendingMessage(tempId) {
       }
     );
   } else {
-    // DM message
     socket.emit('send_message',
-      { receiverId: pending.receiverId, content: pending.content, tempId },
+      { receiverId: pending.receiverId, content: pending.content, tempId, replyTo: pending.replyTo, fileName: pending.fileName, fileType: pending.fileType },
       (ack) => {
         if (ack && ack.success) {
-          // Update UI: remove pending state, set real ID
           const el = document.querySelector(`[data-msg-id="${tempId}"]`);
           if (el) {
             el.dataset.msgId = ack.messageId;
@@ -539,8 +609,7 @@ async function loadUsers() {
   try {
     const res = await authFetch('/api/users');
     const users = await res.json();
-    allUsers = users; // Cache for group creation
-    // Store last_seen data
+    allUsers = users;
     users.forEach(u => {
       if (u.last_seen) lastSeenData[u.id] = u.last_seen;
     });
@@ -566,7 +635,7 @@ function renderUserList(users) {
     item.dataset.userId = user.id;
     item.dataset.username = user.username;
 
-    const avatar = createAvatar(user.username, isOnline);
+    const avatar = createAvatar(user.username, isOnline, user.avatar);
     const info = document.createElement('div');
     info.className = 'user-item-info';
 
@@ -601,7 +670,6 @@ function renderUserList(users) {
       const name = item.dataset.username.toLowerCase();
       item.style.display = name.includes(q) ? '' : 'none';
     });
-    // Also filter groups
     $$('.group-item').forEach(item => {
       const name = (item.dataset.groupName || '').toLowerCase();
       item.style.display = name.includes(q) ? '' : 'none';
@@ -614,13 +682,15 @@ function updateUserListOnlineStatus() {
     const uid = parseInt(item.dataset.userId);
     const isOnline = onlineUserIds.includes(uid);
     const avatar = item.querySelector('.user-avatar');
-    avatar.className = 'user-avatar' + (isOnline ? ' online' : '');
+    if (avatar) {
+      avatar.classList.toggle('online', isOnline);
+    }
   });
 }
 
 function updateChatHeaderStatus() {
   if (!selectedUserId) return;
-  if (selectedGroupId) return; // Groups don't have online status
+  if (selectedGroupId) return;
   const isOnline = onlineUserIds.includes(selectedUserId);
   const statusEl = $('#chat-status');
 
@@ -628,18 +698,13 @@ function updateChatHeaderStatus() {
     statusEl.textContent = 'Online';
     statusEl.className = 'status-text online';
   } else {
-    // Show last seen if available
     const lastSeen = lastSeenData[selectedUserId];
-    if (lastSeen) {
-      statusEl.textContent = formatLastSeen(lastSeen);
-    } else {
-      statusEl.textContent = 'Offline';
-    }
+    statusEl.textContent = lastSeen ? formatLastSeen(lastSeen) : 'Offline';
     statusEl.className = 'status-text';
   }
 
   const avatar = $('#chat-avatar');
-  avatar.className = 'user-avatar' + (isOnline ? ' online' : '');
+  avatar.classList.toggle('online', isOnline);
 }
 
 function updateUnreadBadge(userId) {
@@ -662,11 +727,10 @@ function updateUnreadBadge(userId) {
 function updateUserPreview(userId, text) {
   const el = document.querySelector(`[data-preview-for="${userId}"]`);
   if (el) {
-    if (text && text.startsWith('[image]')) {
-      el.textContent = '📷 Hình ảnh';
-    } else {
-      el.textContent = text.slice(0, 40);
-    }
+    if (text && text.startsWith('[image]')) el.textContent = '📷 Hình ảnh';
+    else if (text && text.startsWith('[file]')) el.textContent = '📎 Tệp đính kèm';
+    else if (text && text.startsWith('[sticker]')) el.textContent = '🎃 Sticker';
+    else el.textContent = (text || '').slice(0, 40);
   }
 }
 
@@ -674,7 +738,10 @@ function updateUserPreview(userId, text) {
 
 async function selectUser(userId, username) {
   selectedUserId = userId;
-  selectedGroupId = null; // Deselect group
+  selectedGroupId = null;
+  hasMoreMessages = true;
+  oldestMessageId = null;
+  clearReply();
 
   delete unreadCounts[userId];
   updateUnreadBadge(userId);
@@ -682,17 +749,16 @@ async function selectUser(userId, username) {
   $$('.user-item').forEach(item => {
     item.classList.toggle('active', parseInt(item.dataset.userId) === userId);
   });
-  // Deselect groups
   $$('.group-item').forEach(item => item.classList.remove('active'));
 
   $('#no-chat').classList.add('hidden');
   $('#chat-box').classList.remove('hidden');
   $('#chat-with-name').textContent = username;
-  setStaticAvatar($('#chat-avatar'), username, onlineUserIds.includes(userId));
+  const userObj = allUsers.find(u => u.id === userId);
+  setStaticAvatar($('#chat-avatar'), username, onlineUserIds.includes(userId), userObj?.avatar);
   updateChatHeaderStatus();
   updateBlockButton();
 
-  // Mobile: hide sidebar and show chat
   if (document.body.classList.contains('mobile')) {
     $('.sidebar').classList.add('sidebar-hidden');
     $('.chat-area').classList.add('chat-visible');
@@ -700,8 +766,15 @@ async function selectUser(userId, username) {
 
   $('#messages').innerHTML = '';
   try {
-    const res = await authFetch(`/api/messages/${userId}`);
+    const res = await authFetch(`/api/messages/${userId}?limit=50`);
     const messages = await res.json();
+
+    if (messages.length > 0) {
+      oldestMessageId = messages[0].id;
+      hasMoreMessages = messages.length >= 50;
+    } else {
+      hasMoreMessages = false;
+    }
 
     let lastDate = '';
     messages.forEach(msg => {
@@ -717,14 +790,12 @@ async function selectUser(userId, username) {
     });
     scrollToBottom(false);
 
-    // ---- READ RECEIPTS: mark messages as read ----
     try {
       authFetch(`/api/messages/read/${userId}`, { method: 'POST' });
     } catch {}
     if (socket && socket.connected) {
       socket.emit('mark_read', { senderId: userId });
     }
-
   } catch (err) {
     if (err.message !== 'Unauthorized') console.warn('Failed to load messages');
   }
@@ -732,55 +803,184 @@ async function selectUser(userId, username) {
   $('#message-input').focus();
 }
 
-function appendMessage(msg, animate = true, isGroupMsg = false) {
+// ---- INFINITE SCROLL (load older messages) ----
+
+function initInfiniteScroll() {
+  const messagesEl = $('#messages');
+  messagesEl.addEventListener('scroll', async () => {
+    if (messagesEl.scrollTop < 80 && !loadingOlder && hasMoreMessages && oldestMessageId) {
+      await loadOlderMessages();
+    }
+  });
+}
+
+async function loadOlderMessages() {
+  loadingOlder = true;
+  const messagesEl = $('#messages');
+  const prevHeight = messagesEl.scrollHeight;
+
+  try {
+    let url;
+    if (selectedGroupId) {
+      url = `/api/groups/${selectedGroupId}/messages?before=${oldestMessageId}&limit=50`;
+    } else if (selectedUserId) {
+      url = `/api/messages/${selectedUserId}?before=${oldestMessageId}&limit=50`;
+    } else {
+      loadingOlder = false;
+      return;
+    }
+
+    const res = await authFetch(url);
+    const messages = await res.json();
+
+    if (messages.length === 0) {
+      hasMoreMessages = false;
+      loadingOlder = false;
+      return;
+    }
+
+    hasMoreMessages = messages.length >= 50;
+    oldestMessageId = messages[0].id;
+
+    const fragment = document.createDocumentFragment();
+    let lastDate = '';
+    messages.forEach(msg => {
+      const msgDate = formatDate(msg.created_at);
+      if (msgDate !== lastDate) {
+        lastDate = msgDate;
+        const divider = document.createElement('div');
+        divider.className = 'date-divider';
+        divider.innerHTML = `<span>${msgDate}</span>`;
+        fragment.appendChild(divider);
+      }
+      const el = createMessageEl(msg, false, !!selectedGroupId);
+      fragment.appendChild(el);
+    });
+
+    messagesEl.insertBefore(fragment, messagesEl.firstChild);
+    // Maintain scroll position
+    messagesEl.scrollTop = messagesEl.scrollHeight - prevHeight;
+  } catch (err) {
+    if (err.message !== 'Unauthorized') console.warn('Failed to load older messages');
+  }
+
+  loadingOlder = false;
+}
+
+// ---- MESSAGE ELEMENT CREATION ----
+
+function createMessageEl(msg, animate = true, isGroupMsg = false) {
   const isSent = msg.sender_id === currentUser.id;
   const isPending = !!msg.pending;
   const isSticker = msg.content && msg.content.startsWith('[sticker]');
   const isImage = msg.content && msg.content.startsWith('[image]');
+  const isFile = msg.content && msg.content.startsWith('[file]');
+  const isDeleted = msg.is_deleted;
+  const isEdited = msg.is_edited;
+
   const el = document.createElement('div');
-  el.className = 'message ' + (isSent ? 'sent' : 'received') + (isPending ? ' pending' : '') + (isSticker ? ' sticker-message' : '') + (isImage ? ' image-message' : '');
+  el.className = 'message ' + (isSent ? 'sent' : 'received')
+    + (isPending ? ' pending' : '')
+    + (isSticker ? ' sticker-message' : '')
+    + (isImage ? ' image-message' : '')
+    + (isFile ? ' file-message' : '')
+    + (isDeleted ? ' deleted' : '');
   el.dataset.msgId = msg.id;
   if (!animate) el.style.animation = 'none';
 
   let status = '';
   if (isSent) {
-    if (isPending) {
-      status = '<span class="msg-status">⏳</span>';
-    } else if (msg.is_read) {
-      status = '<span class="msg-status read">✓✓</span>';
-    } else {
-      status = '<span class="msg-status">✓</span>';
-    }
+    if (isPending) status = '<span class="msg-status">⏳</span>';
+    else if (msg.is_read) status = '<span class="msg-status read">✓✓</span>';
+    else status = '<span class="msg-status">✓</span>';
   }
 
-  // Show sender name in group messages for received messages
   let senderLabel = '';
   if (isGroupMsg && !isSent && msg.sender_name) {
-    senderLabel = `<div class="group-sender-name" style="font-size:11px;font-weight:600;color:${getColor(msg.sender_name)};margin-bottom:2px;">${escapeHtml(msg.sender_name)}</div>`;
+    senderLabel = `<div class="group-sender-name" style="font-size:11px;font-weight:600;color:${getColor(msg.sender_name)};margin-bottom:2px;">${escapeHtml(msg.sender_display_name || msg.sender_name)}</div>`;
   }
 
-  if (isImage) {
-    // Render image message
-    const dataUrl = msg.content.substring(7); // Remove [image] prefix
-    el.innerHTML = `${senderLabel}<img src="${dataUrl}" class="chat-image" alt="Hình ảnh" onclick="openImagePreview(this.src)" /><span class="time">${formatTime(msg.created_at)}${status}</span>`;
+  // Reply quote
+  let replyHtml = '';
+  if (msg.reply_to && msg.reply_content && !isDeleted) {
+    const replyPreview = msg.reply_content.startsWith('[') ? 'Tệp đính kèm' : msg.reply_content.slice(0, 60);
+    replyHtml = `<div class="reply-quote"><span class="reply-author">${escapeHtml(msg.reply_sender_name || 'Người dùng')}</span><span class="reply-text">${escapeHtml(replyPreview)}</span></div>`;
+  }
+
+  let editedBadge = isEdited && !isDeleted ? '<span class="edited-badge">(đã chỉnh sửa) </span>' : '';
+
+  if (isDeleted) {
+    el.innerHTML = `${senderLabel}<span class="msg-content"><em>Tin nhắn đã bị xóa</em></span><span class="time">${editedBadge}${formatTime(msg.created_at)}${status}</span>`;
+  } else if (isFile) {
+    const dataUrl = msg.content.substring(6);
+    const fName = msg.file_name || 'file';
+    const fIcon = getFileIcon(fName);
+    el.innerHTML = `${senderLabel}${replyHtml}<div class="file-attachment"><span class="file-icon">${fIcon}</span><a href="${dataUrl}" download="${escapeHtml(fName)}" class="file-link">${escapeHtml(fName)}</a></div><span class="time">${editedBadge}${formatTime(msg.created_at)}${status}</span>`;
+  } else if (isImage) {
+    const dataUrl = msg.content.substring(7);
+    el.innerHTML = `${senderLabel}${replyHtml}<img src="${dataUrl}" class="chat-image" alt="Hình ảnh" onclick="openImagePreview(this.src)" /><span class="time">${editedBadge}${formatTime(msg.created_at)}${status}</span>`;
   } else if (isSticker) {
-    // Render sticker as large emoji without bubble
     const stickerEmoji = msg.content.replace('[sticker]', '').trim();
-    el.innerHTML = `${senderLabel}<span class="sticker-display">${stickerEmoji}</span><span class="time">${formatTime(msg.created_at)}${status}</span>`;
+    el.innerHTML = `${senderLabel}${replyHtml}<span class="sticker-display">${stickerEmoji}</span><span class="time">${editedBadge}${formatTime(msg.created_at)}${status}</span>`;
   } else {
-    el.innerHTML = `${senderLabel}${escapeHtml(msg.content)}<span class="time">${formatTime(msg.created_at)}${status}</span>`;
+    el.innerHTML = `${senderLabel}${replyHtml}<span class="msg-content">${escapeHtml(msg.content)}</span><span class="time">${editedBadge}${formatTime(msg.created_at)}${status}</span>`;
   }
 
-  // Reaction button
-  const reactionBtn = document.createElement('button');
-  reactionBtn.className = 'reaction-add-btn';
-  reactionBtn.textContent = '+';
-  reactionBtn.title = 'Thêm reaction';
-  reactionBtn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    showReactionPicker(el, msg.id);
-  });
-  el.appendChild(reactionBtn);
+  if (!isDeleted) {
+    // Action buttons (reply, edit, delete)
+    const actionsDiv = document.createElement('div');
+    actionsDiv.className = 'msg-actions';
+
+    // Reply button
+    const replyBtn = document.createElement('button');
+    replyBtn.className = 'msg-action-btn';
+    replyBtn.title = 'Trả lời';
+    replyBtn.innerHTML = '↩';
+    replyBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      setReply(msg);
+    });
+    actionsDiv.appendChild(replyBtn);
+
+    if (isSent && !isSticker && !isImage && !isFile) {
+      // Edit button
+      const editBtn = document.createElement('button');
+      editBtn.className = 'msg-action-btn';
+      editBtn.title = 'Chỉnh sửa';
+      editBtn.innerHTML = '✏️';
+      editBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        startEditMessage(el, msg);
+      });
+      actionsDiv.appendChild(editBtn);
+    }
+
+    if (isSent) {
+      // Delete button
+      const delBtn = document.createElement('button');
+      delBtn.className = 'msg-action-btn';
+      delBtn.title = 'Xóa';
+      delBtn.innerHTML = '🗑️';
+      delBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        deleteMessage(msg.id);
+      });
+      actionsDiv.appendChild(delBtn);
+    }
+
+    el.appendChild(actionsDiv);
+
+    // Reaction button
+    const reactionBtn = document.createElement('button');
+    reactionBtn.className = 'reaction-add-btn';
+    reactionBtn.textContent = '+';
+    reactionBtn.title = 'Thêm reaction';
+    reactionBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      showReactionPicker(el, msg.id);
+    });
+    el.appendChild(reactionBtn);
+  }
 
   // Reactions container
   const reactionsContainer = document.createElement('div');
@@ -788,18 +988,86 @@ function appendMessage(msg, animate = true, isGroupMsg = false) {
   reactionsContainer.dataset.reactionsFor = msg.id;
   el.appendChild(reactionsContainer);
 
-  // Render existing reactions if any
   if (msg.reactions && msg.reactions.length > 0) {
     renderReactions(reactionsContainer, msg.id, msg.reactions);
   }
 
+  return el;
+}
+
+function appendMessage(msg, animate = true, isGroupMsg = false) {
+  const el = createMessageEl(msg, animate, isGroupMsg);
   $('#messages').appendChild(el);
+}
+
+// ---- REPLY ----
+
+function setReply(msg) {
+  replyingTo = { id: msg.id, senderName: msg.sender_display_name || msg.sender_name || 'Người dùng', content: msg.content };
+  const bar = $('#reply-bar');
+  bar.classList.remove('hidden');
+  bar.querySelector('.reply-bar-name').textContent = replyingTo.senderName;
+  const preview = msg.content.startsWith('[') ? 'Tệp đính kèm' : msg.content.slice(0, 60);
+  bar.querySelector('.reply-bar-text').textContent = preview;
+  $('#message-input').focus();
+}
+
+function clearReply() {
+  replyingTo = null;
+  const bar = $('#reply-bar');
+  if (bar) bar.classList.add('hidden');
+}
+
+// ---- EDIT MESSAGE ----
+
+function startEditMessage(el, msg) {
+  const contentEl = el.querySelector('.msg-content');
+  if (!contentEl) return;
+  const originalText = msg.content;
+
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'edit-msg-input';
+  input.value = originalText;
+  input.maxLength = 2000;
+
+  contentEl.replaceWith(input);
+  input.focus();
+  input.select();
+
+  const finish = (save) => {
+    const newContent = input.value.trim();
+    if (save && newContent && newContent !== originalText) {
+      socket.emit('edit_message', { messageId: msg.id, content: newContent, isGroup: !!selectedGroupId });
+      const span = document.createElement('span');
+      span.className = 'msg-content';
+      span.textContent = newContent;
+      input.replaceWith(span);
+    } else {
+      const span = document.createElement('span');
+      span.className = 'msg-content';
+      span.textContent = originalText;
+      input.replaceWith(span);
+    }
+  };
+
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') finish(true);
+    if (e.key === 'Escape') finish(false);
+  });
+  input.addEventListener('blur', () => finish(true));
+}
+
+// ---- DELETE MESSAGE ----
+
+function deleteMessage(messageId) {
+  if (!confirm('Xóa tin nhắn này?')) return;
+  socket.emit('delete_message', { messageId, isGroup: !!selectedGroupId });
 }
 
 // ---- IMAGE PREVIEW ----
 
 function openImagePreview(src) {
-  // Remove existing preview
   const existing = $('#image-preview-overlay');
   if (existing) existing.remove();
 
@@ -810,14 +1078,11 @@ function openImagePreview(src) {
   overlay.addEventListener('click', () => overlay.remove());
   document.body.appendChild(overlay);
 }
-
-// Make it globally accessible
 window.openImagePreview = openImagePreview;
 
 // ---- REACTIONS ----
 
 function showReactionPicker(messageEl, messageId) {
-  // Remove any existing picker
   const existing = document.querySelector('.reaction-picker-popup');
   if (existing) existing.remove();
 
@@ -838,7 +1103,6 @@ function showReactionPicker(messageEl, messageId) {
 
   messageEl.appendChild(picker);
 
-  // Close picker on outside click
   const closeHandler = (e) => {
     if (!picker.contains(e.target)) {
       picker.remove();
@@ -850,8 +1114,6 @@ function showReactionPicker(messageEl, messageId) {
 
 function toggleReaction(messageId, emoji) {
   if (!socket || !socket.connected) return;
-
-  // Check if user already reacted with this emoji
   const container = document.querySelector(`[data-reactions-for="${messageId}"]`);
   if (container) {
     const existingBadge = container.querySelector(`[data-reaction-emoji="${emoji}"]`);
@@ -860,7 +1122,6 @@ function toggleReaction(messageId, emoji) {
       return;
     }
   }
-
   socket.emit('add_reaction', { messageId, emoji });
 }
 
@@ -874,7 +1135,6 @@ function renderReactions(container, messageId, reactions) {
   container.innerHTML = '';
   if (!reactions || reactions.length === 0) return;
 
-  // Group reactions by emoji
   const grouped = {};
   reactions.forEach(r => {
     if (!grouped[r.emoji]) grouped[r.emoji] = [];
@@ -910,7 +1170,7 @@ function scrollToBottom(smooth = true) {
 // ---- EMOJI PICKER ----
 
 let emojiPickerOpen = false;
-let currentEmojiTab = 'emoji'; // 'emoji' or 'sticker'
+let currentEmojiTab = 'emoji';
 
 function initEmojiPicker() {
   const emojiBtn = $('#emoji-btn');
@@ -928,7 +1188,6 @@ function initEmojiPicker() {
     }
   });
 
-  // Close picker on outside click
   document.addEventListener('click', (e) => {
     if (emojiPickerOpen && !emojiPicker.contains(e.target) && e.target !== emojiBtn) {
       emojiPickerOpen = false;
@@ -936,7 +1195,6 @@ function initEmojiPicker() {
     }
   });
 
-  // Tab switching
   emojiPicker.addEventListener('click', (e) => {
     if (e.target.classList.contains('emoji-tab')) {
       currentEmojiTab = e.target.dataset.tab;
@@ -945,7 +1203,6 @@ function initEmojiPicker() {
     }
   });
 
-  // Search
   emojiPicker.addEventListener('input', (e) => {
     if (e.target.id === 'emoji-search') {
       renderEmojiPickerContent(e.target.value.trim().toLowerCase());
@@ -974,23 +1231,12 @@ function renderEmojiGrid(searchQuery = '') {
 
   if (searchQuery) {
     grid.classList.add('search-mode');
-    // Search mode - filter all emojis
-    const allEmojis = new Set();
-    Object.values(EMOJI_DATA).forEach(emojis => emojis.forEach(e => allEmojis.add(e)));
-
-    // Also search by Vietnamese keywords
     const matchedFromKeywords = new Set();
     Object.entries(EMOJI_KEYWORDS).forEach(([keyword, emojis]) => {
-      if (keyword.includes(searchQuery)) {
-        emojis.forEach(e => matchedFromKeywords.add(e));
-      }
+      if (keyword.includes(searchQuery)) emojis.forEach(e => matchedFromKeywords.add(e));
     });
-
-    // Also search by category name
     Object.entries(EMOJI_DATA).forEach(([category, emojis]) => {
-      if (category.toLowerCase().includes(searchQuery)) {
-        emojis.forEach(e => matchedFromKeywords.add(e));
-      }
+      if (category.toLowerCase().includes(searchQuery)) emojis.forEach(e => matchedFromKeywords.add(e));
     });
 
     if (matchedFromKeywords.size > 0) {
@@ -1006,7 +1252,6 @@ function renderEmojiGrid(searchQuery = '') {
     }
   } else {
     grid.classList.remove('search-mode');
-    // Category mode
     Object.entries(EMOJI_DATA).forEach(([category, emojis]) => {
       const header = document.createElement('div');
       header.className = 'emoji-category-header';
@@ -1030,7 +1275,6 @@ function renderEmojiGrid(searchQuery = '') {
 function renderStickerGrid() {
   const grid = $('#sticker-grid');
   grid.innerHTML = '';
-
   STICKERS.forEach(sticker => {
     const btn = document.createElement('button');
     btn.className = 'sticker-item';
@@ -1043,15 +1287,12 @@ function renderStickerGrid() {
 function insertEmojiAtCursor(emoji) {
   const input = $('#message-input');
   if (!input) return;
-
   const start = input.selectionStart;
   const end = input.selectionEnd;
   const value = input.value;
   input.value = value.substring(0, start) + emoji + value.substring(end);
   input.selectionStart = input.selectionEnd = start + emoji.length;
   input.focus();
-
-  // Close picker
   emojiPickerOpen = false;
   const picker = $('#emoji-picker');
   if (picker) picker.classList.add('hidden');
@@ -1059,7 +1300,6 @@ function insertEmojiAtCursor(emoji) {
 
 function sendSticker(sticker) {
   if (!selectedUserId && !selectedGroupId) return;
-
   const content = '[sticker]' + sticker;
   const tempId = nextTempId--;
   const msg = {
@@ -1088,7 +1328,6 @@ function sendSticker(sticker) {
   }
   sendPendingMessage(tempId);
 
-  // Close picker
   emojiPickerOpen = false;
   const picker = $('#emoji-picker');
   if (picker) picker.classList.add('hidden');
@@ -1107,13 +1346,10 @@ function initEmojiSuggest() {
     const value = input.value;
     const cursorPos = input.selectionStart;
     const textBeforeCursor = value.substring(0, cursorPos);
-
-    // Find :keyword pattern
     const match = textBeforeCursor.match(/:([a-zA-Z\u00C0-\u024F]+)$/);
 
     if (match) {
       const keyword = match[1].toLowerCase()
-        // Normalize Vietnamese characters for matching
         .replace(/[àáảãạăắằẳẵặâấầẩẫậ]/g, 'a')
         .replace(/[èéẻẽẹêếềểễệ]/g, 'e')
         .replace(/[ìíỉĩị]/g, 'i')
@@ -1124,11 +1360,7 @@ function initEmojiSuggest() {
 
       const matches = [];
       Object.entries(EMOJI_KEYWORDS).forEach(([key, emojis]) => {
-        if (key.includes(keyword)) {
-          emojis.forEach(e => {
-            if (!matches.includes(e)) matches.push(e);
-          });
-        }
+        if (key.includes(keyword)) emojis.forEach(e => { if (!matches.includes(e)) matches.push(e); });
       });
 
       if (matches.length > 0) {
@@ -1136,11 +1368,9 @@ function initEmojiSuggest() {
         return;
       }
     }
-
     hideEmojiSuggest(suggest);
   });
 
-  // Hide on blur (with delay so click can register)
   input.addEventListener('blur', () => {
     setTimeout(() => hideEmojiSuggest(suggest), 200);
   });
@@ -1156,7 +1386,7 @@ function showEmojiSuggest(suggest, emojis, matchText, cursorPos) {
     btn.className = 'emoji-suggest-item';
     btn.textContent = emoji;
     btn.addEventListener('mousedown', (e) => {
-      e.preventDefault(); // Prevent blur
+      e.preventDefault();
       const input = $('#message-input');
       const value = input.value;
       const start = cursorPos - matchText.length;
@@ -1183,19 +1413,18 @@ $('#message-form').addEventListener('submit', (e) => {
   const content = input.value.trim();
   if (!content || (!selectedUserId && !selectedGroupId)) return;
 
-  // Close emoji picker if open
   emojiPickerOpen = false;
   const picker = $('#emoji-picker');
   if (picker) picker.classList.add('hidden');
-
-  // Hide emoji suggest
   const suggest = $('#emoji-suggest');
   if (suggest) hideEmojiSuggest(suggest);
 
   const tempId = nextTempId--;
+  const replyTo = replyingTo ? replyingTo.id : null;
+  const replyContent = replyingTo ? replyingTo.content : null;
+  const replySenderName = replyingTo ? replyingTo.senderName : null;
 
   if (selectedGroupId) {
-    // Group message
     const msg = {
       id: tempId,
       sender_id: currentUser.id,
@@ -1203,36 +1432,37 @@ $('#message-form').addEventListener('submit', (e) => {
       sender_name: currentUser.display_name || currentUser.username,
       content,
       created_at: new Date().toISOString(),
-      pending: true
+      pending: true,
+      reply_to: replyTo,
+      reply_content: replyContent,
+      reply_sender_name: replySenderName
     };
     appendMessage(msg, true, true);
     scrollToBottom();
-    pendingMessages.set(tempId, { content, groupId: selectedGroupId });
+    pendingMessages.set(tempId, { content, groupId: selectedGroupId, replyTo });
     input.value = '';
     input.focus();
+    clearReply();
     sendPendingMessage(tempId);
   } else {
-    // DM message
     const msg = {
       id: tempId,
       sender_id: currentUser.id,
       receiver_id: selectedUserId,
       content,
       created_at: new Date().toISOString(),
-      pending: true
+      pending: true,
+      reply_to: replyTo,
+      reply_content: replyContent,
+      reply_sender_name: replySenderName
     };
-
-    // Show immediately (optimistic)
     appendMessage(msg);
     scrollToBottom();
     updateUserPreview(selectedUserId, content);
-
-    // Queue for sending
-    pendingMessages.set(tempId, { content, receiverId: selectedUserId });
+    pendingMessages.set(tempId, { content, receiverId: selectedUserId, replyTo });
     input.value = '';
     input.focus();
-
-    // Try to send now
+    clearReply();
     sendPendingMessage(tempId);
   }
 });
@@ -1263,7 +1493,6 @@ function initImageUpload() {
   const emojiBtn = $('#emoji-btn');
   if (!form || !emojiBtn) return;
 
-  // Create image upload button
   const imgBtn = document.createElement('button');
   imgBtn.type = 'button';
   imgBtn.id = 'image-btn';
@@ -1272,14 +1501,12 @@ function initImageUpload() {
   imgBtn.textContent = '📷';
   imgBtn.style.cssText = 'margin-left:0;';
 
-  // Create hidden file input
   const fileInput = document.createElement('input');
   fileInput.type = 'file';
   fileInput.accept = 'image/*';
   fileInput.style.display = 'none';
   fileInput.id = 'image-file-input';
 
-  // Insert after emoji button
   emojiBtn.parentNode.insertBefore(imgBtn, emojiBtn.nextSibling);
   form.appendChild(fileInput);
 
@@ -1291,15 +1518,11 @@ function initImageUpload() {
   fileInput.addEventListener('change', () => {
     const file = fileInput.files[0];
     if (!file) return;
-
-    // Validate size < 500KB
     if (file.size > 500 * 1024) {
       alert('Hình ảnh quá lớn! Tối đa 500KB.');
       fileInput.value = '';
       return;
     }
-
-    // Validate it's actually an image
     if (!file.type.startsWith('image/')) {
       alert('Vui lòng chọn file hình ảnh.');
       fileInput.value = '';
@@ -1310,37 +1533,17 @@ function initImageUpload() {
     reader.onload = (ev) => {
       const dataUrl = ev.target.result;
       const content = '[image]' + dataUrl;
-
-      if (!selectedUserId && !selectedGroupId) {
-        alert('Vui lòng chọn người nhận trước.');
-        return;
-      }
+      if (!selectedUserId && !selectedGroupId) { alert('Vui lòng chọn người nhận trước.'); return; }
 
       const tempId = nextTempId--;
-
       if (selectedGroupId) {
-        const msg = {
-          id: tempId,
-          sender_id: currentUser.id,
-          group_id: selectedGroupId,
-          sender_name: currentUser.display_name || currentUser.username,
-          content,
-          created_at: new Date().toISOString(),
-          pending: true
-        };
+        const msg = { id: tempId, sender_id: currentUser.id, group_id: selectedGroupId, sender_name: currentUser.display_name || currentUser.username, content, created_at: new Date().toISOString(), pending: true };
         appendMessage(msg, true, true);
         scrollToBottom();
         pendingMessages.set(tempId, { content, groupId: selectedGroupId });
         sendPendingMessage(tempId);
       } else {
-        const msg = {
-          id: tempId,
-          sender_id: currentUser.id,
-          receiver_id: selectedUserId,
-          content,
-          created_at: new Date().toISOString(),
-          pending: true
-        };
+        const msg = { id: tempId, sender_id: currentUser.id, receiver_id: selectedUserId, content, created_at: new Date().toISOString(), pending: true };
         appendMessage(msg);
         scrollToBottom();
         updateUserPreview(selectedUserId, content);
@@ -1349,10 +1552,149 @@ function initImageUpload() {
       }
     };
     reader.readAsDataURL(file);
-
-    // Reset file input so same file can be selected again
     fileInput.value = '';
   });
+}
+
+// ---- FILE UPLOAD ----
+
+function initFileUpload() {
+  const form = $('#message-form');
+  const imgBtn = $('#image-btn');
+  if (!form) return;
+
+  const fileBtn = document.createElement('button');
+  fileBtn.type = 'button';
+  fileBtn.id = 'file-btn';
+  fileBtn.className = 'emoji-btn';
+  fileBtn.title = 'Gửi tệp';
+  fileBtn.textContent = '📎';
+  fileBtn.style.cssText = 'margin-left:0;';
+
+  const fileInput = document.createElement('input');
+  fileInput.type = 'file';
+  fileInput.accept = '.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.zip,.rar,.7z,.txt,.csv,.json,.xml,.mp3,.wav,.mp4';
+  fileInput.style.display = 'none';
+  fileInput.id = 'general-file-input';
+
+  const insertAfter = imgBtn || $('#emoji-btn');
+  if (insertAfter) insertAfter.parentNode.insertBefore(fileBtn, insertAfter.nextSibling);
+  form.appendChild(fileInput);
+
+  fileBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    fileInput.click();
+  });
+
+  fileInput.addEventListener('change', () => {
+    const file = fileInput.files[0];
+    if (!file) return;
+    if (file.size > 2 * 1024 * 1024) {
+      alert('Tệp quá lớn! Tối đa 2MB.');
+      fileInput.value = '';
+      return;
+    }
+    if (!selectedUserId && !selectedGroupId) { alert('Vui lòng chọn người nhận trước.'); fileInput.value = ''; return; }
+
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const dataUrl = ev.target.result;
+      const content = '[file]' + dataUrl;
+      const tempId = nextTempId--;
+
+      if (selectedGroupId) {
+        const msg = { id: tempId, sender_id: currentUser.id, group_id: selectedGroupId, sender_name: currentUser.display_name || currentUser.username, content, created_at: new Date().toISOString(), pending: true, file_name: file.name, file_type: file.type };
+        appendMessage(msg, true, true);
+        scrollToBottom();
+        pendingMessages.set(tempId, { content, groupId: selectedGroupId, fileName: file.name, fileType: file.type });
+        sendPendingMessage(tempId);
+      } else {
+        const msg = { id: tempId, sender_id: currentUser.id, receiver_id: selectedUserId, content, created_at: new Date().toISOString(), pending: true, file_name: file.name, file_type: file.type };
+        appendMessage(msg);
+        scrollToBottom();
+        updateUserPreview(selectedUserId, content);
+        pendingMessages.set(tempId, { content, receiverId: selectedUserId, fileName: file.name, fileType: file.type });
+        sendPendingMessage(tempId);
+      }
+    };
+    reader.readAsDataURL(file);
+    fileInput.value = '';
+  });
+}
+
+// ---- MESSAGE SEARCH ----
+
+function initMessageSearch() {
+  const searchBtn = $('#msg-search-btn');
+  const searchBar = $('#msg-search-bar');
+  const searchInput = $('#msg-search-input');
+  const closeBtn = $('#msg-search-close');
+  const resultsDiv = $('#msg-search-results');
+
+  if (!searchBtn) return;
+
+  searchBtn.addEventListener('click', () => {
+    searchBar.classList.toggle('hidden');
+    if (!searchBar.classList.contains('hidden')) {
+      searchInput.focus();
+      searchInput.value = '';
+      resultsDiv.innerHTML = '';
+    }
+  });
+
+  closeBtn.addEventListener('click', () => {
+    searchBar.classList.add('hidden');
+    resultsDiv.innerHTML = '';
+    searchInput.value = '';
+  });
+
+  let searchTimeout;
+  searchInput.addEventListener('input', () => {
+    clearTimeout(searchTimeout);
+    searchTimeout = setTimeout(() => doMessageSearch(searchInput.value.trim()), 400);
+  });
+}
+
+async function doMessageSearch(query) {
+  const resultsDiv = $('#msg-search-results');
+  if (!query || query.length < 2) { resultsDiv.innerHTML = ''; return; }
+
+  try {
+    let url;
+    if (selectedGroupId) {
+      url = `/api/groups/${selectedGroupId}/messages/search?q=${encodeURIComponent(query)}`;
+    } else if (selectedUserId) {
+      url = `/api/messages/search/${selectedUserId}?q=${encodeURIComponent(query)}`;
+    } else return;
+
+    const res = await authFetch(url);
+    const messages = await res.json();
+
+    if (messages.length === 0) {
+      resultsDiv.innerHTML = '<div class="search-no-result">Không tìm thấy</div>';
+      return;
+    }
+
+    resultsDiv.innerHTML = '';
+    messages.forEach(msg => {
+      const item = document.createElement('div');
+      item.className = 'search-result-item';
+      const sender = msg.sender_display_name || msg.sender_name || 'Người dùng';
+      item.innerHTML = `<span class="search-result-sender">${escapeHtml(sender)}</span><span class="search-result-text">${escapeHtml(msg.content.slice(0, 80))}</span><span class="search-result-time">${formatDate(msg.created_at)} ${formatTime(msg.created_at)}</span>`;
+      item.addEventListener('click', () => {
+        // Scroll to message if visible
+        const el = document.querySelector(`[data-msg-id="${msg.id}"]`);
+        if (el) {
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          el.classList.add('highlight');
+          setTimeout(() => el.classList.remove('highlight'), 2000);
+        }
+      });
+      resultsDiv.appendChild(item);
+    });
+  } catch (err) {
+    if (err.message !== 'Unauthorized') console.warn('Search failed');
+  }
 }
 
 // ---- BLOCK / UNBLOCK ----
@@ -1392,79 +1734,145 @@ function renderBlockedUsersList(users) {
 function updateBlockButton() {
   const btn = $('#block-btn');
   if (!btn || !selectedUserId) return;
-  // Hide block button for bot
-  if (userRoles[selectedUserId] === 'bot') {
-    btn.classList.add('hidden');
-    return;
-  }
-  // Hide block button in group chat
-  if (selectedGroupId) {
-    btn.classList.add('hidden');
-    return;
-  }
+  if (userRoles[selectedUserId] === 'bot') { btn.classList.add('hidden'); return; }
+  if (selectedGroupId) { btn.classList.add('hidden'); return; }
   btn.classList.remove('hidden');
   const isBlocked = blockedUserIds.has(selectedUserId);
   const textEl = btn.querySelector('.block-btn-text');
-  if (textEl) {
-    textEl.textContent = isBlocked ? 'Bỏ chặn' : 'Chặn';
-  }
+  if (textEl) textEl.textContent = isBlocked ? 'Bỏ chặn' : 'Chặn';
   btn.classList.toggle('blocked', isBlocked);
 }
 
 async function blockUser(userId) {
   try {
     const res = await authFetch(`/api/block/${userId}`, { method: 'POST' });
-    if (res.ok) {
-      blockedUserIds.add(userId);
-      updateBlockButton();
-      loadBlockedUsers();
-      loadUsers();
-    } else {
-      const data = await res.json();
-      alert(data.error || 'Không thể chặn người dùng');
-    }
-  } catch (err) {
-    if (err.message !== 'Unauthorized') alert('Lỗi kết nối server');
-  }
+    if (res.ok) { blockedUserIds.add(userId); updateBlockButton(); loadBlockedUsers(); loadUsers(); }
+    else { const data = await res.json(); alert(data.error || 'Không thể chặn người dùng'); }
+  } catch (err) { if (err.message !== 'Unauthorized') alert('Lỗi kết nối server'); }
 }
 
 async function unblockUser(userId) {
   try {
     const res = await authFetch(`/api/block/${userId}`, { method: 'DELETE' });
-    if (res.ok) {
-      blockedUserIds.delete(userId);
-      updateBlockButton();
-      loadBlockedUsers();
-      loadUsers();
-    } else {
-      const data = await res.json();
-      alert(data.error || 'Không thể bỏ chặn người dùng');
-    }
-  } catch (err) {
-    if (err.message !== 'Unauthorized') alert('Lỗi kết nối server');
-  }
+    if (res.ok) { blockedUserIds.delete(userId); updateBlockButton(); loadBlockedUsers(); loadUsers(); }
+    else { const data = await res.json(); alert(data.error || 'Không thể bỏ chặn người dùng'); }
+  } catch (err) { if (err.message !== 'Unauthorized') alert('Lỗi kết nối server'); }
 }
 
 $('#block-btn').addEventListener('click', () => {
   if (!selectedUserId) return;
-  if (blockedUserIds.has(selectedUserId)) {
-    unblockUser(selectedUserId);
-  } else {
-    blockUser(selectedUserId);
-  }
+  if (blockedUserIds.has(selectedUserId)) unblockUser(selectedUserId);
+  else blockUser(selectedUserId);
 });
 
 $('#blocked-users-btn').addEventListener('click', () => {
   const section = $('#blocked-users-section');
   section.classList.toggle('hidden');
-  if (!section.classList.contains('hidden')) {
-    loadBlockedUsers();
-  }
+  if (!section.classList.contains('hidden')) loadBlockedUsers();
 });
 
 $('#close-blocked-section').addEventListener('click', () => {
   $('#blocked-users-section').classList.add('hidden');
 });
+
+// ---- PROFILE ----
+
+function initProfile() {
+  const profileBtn = $('#profile-btn');
+  if (!profileBtn) return;
+
+  profileBtn.addEventListener('click', () => {
+    showProfileModal();
+  });
+}
+
+function showProfileModal() {
+  const existing = $('#profile-modal');
+  if (existing) existing.remove();
+
+  const modal = document.createElement('div');
+  modal.id = 'profile-modal';
+  modal.className = 'modal-overlay';
+
+  const avatarSrc = currentUser.avatar || '';
+  const displayName = currentUser.display_name || '';
+
+  modal.innerHTML = `
+    <div class="modal">
+      <h3>Hồ sơ cá nhân</h3>
+      <div style="text-align:center;margin-bottom:16px;">
+        <div id="profile-avatar-preview" class="profile-avatar-preview" style="width:80px;height:80px;border-radius:50%;margin:0 auto 12px;display:flex;align-items:center;justify-content:center;font-size:32px;color:#fff;cursor:pointer;background:${avatarSrc ? `url(${avatarSrc}) center/cover` : getColor(currentUser.username)};box-shadow:0 2px 12px rgba(0,0,0,0.15);">${avatarSrc ? '' : currentUser.username.charAt(0).toUpperCase()}</div>
+        <input type="file" id="profile-avatar-input" accept="image/*" style="display:none;" />
+        <button id="profile-change-avatar" style="font-size:12px;background:none;border:1px solid var(--border);padding:4px 12px;border-radius:8px;cursor:pointer;color:var(--text);">Đổi ảnh đại diện</button>
+        <button id="profile-remove-avatar" style="font-size:12px;background:none;border:1px solid var(--danger);padding:4px 12px;border-radius:8px;cursor:pointer;color:var(--danger);margin-left:6px;${avatarSrc ? '' : 'display:none;'}">Xóa ảnh</button>
+      </div>
+      <label style="font-size:13px;font-weight:600;color:var(--text-light);display:block;margin-bottom:4px;">Tên hiển thị</label>
+      <input type="text" id="profile-display-name" value="${escapeHtml(displayName)}" placeholder="Nhập tên hiển thị..." style="width:100%;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;background:var(--bg);color:var(--text);box-sizing:border-box;" />
+      <div class="modal-actions" style="margin-top:16px;">
+        <button class="btn-cancel" id="profile-cancel">Hủy</button>
+        <button class="btn-primary" id="profile-save">Lưu</button>
+      </div>
+    </div>
+  `;
+
+  document.body.appendChild(modal);
+
+  let newAvatar = currentUser.avatar || null;
+
+  modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
+  modal.querySelector('#profile-cancel').addEventListener('click', () => modal.remove());
+  modal.querySelector('#profile-change-avatar').addEventListener('click', () => modal.querySelector('#profile-avatar-input').click());
+  modal.querySelector('#profile-remove-avatar').addEventListener('click', () => {
+    newAvatar = null;
+    const preview = modal.querySelector('#profile-avatar-preview');
+    preview.style.backgroundImage = '';
+    preview.style.background = getColor(currentUser.username);
+    preview.textContent = currentUser.username.charAt(0).toUpperCase();
+    modal.querySelector('#profile-remove-avatar').style.display = 'none';
+  });
+
+  modal.querySelector('#profile-avatar-input').addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    if (file.size > 150 * 1024) { alert('Ảnh quá lớn (tối đa 150KB)'); return; }
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      newAvatar = ev.target.result;
+      const preview = modal.querySelector('#profile-avatar-preview');
+      preview.style.backgroundImage = `url(${newAvatar})`;
+      preview.style.backgroundSize = 'cover';
+      preview.style.backgroundPosition = 'center';
+      preview.textContent = '';
+      modal.querySelector('#profile-remove-avatar').style.display = '';
+    };
+    reader.readAsDataURL(file);
+  });
+
+  modal.querySelector('#profile-save').addEventListener('click', async () => {
+    const displayName = modal.querySelector('#profile-display-name').value.trim();
+    try {
+      const res = await authFetch('/api/profile', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ displayName, avatar: newAvatar })
+      });
+      if (res.ok) {
+        const updated = await res.json();
+        currentUser.display_name = updated.display_name;
+        currentUser.avatar = updated.avatar;
+        const myName = updated.display_name || currentUser.username;
+        $('#my-username').textContent = myName;
+        setStaticAvatar($('#my-avatar'), myName, true, updated.avatar);
+        modal.remove();
+      } else {
+        const d = await res.json();
+        alert(d.error || 'Lỗi cập nhật hồ sơ');
+      }
+    } catch (err) {
+      if (err.message !== 'Unauthorized') alert('Lỗi kết nối server');
+    }
+  });
+}
 
 // ---- GROUP CHAT ----
 
@@ -1480,10 +1888,8 @@ async function loadGroups() {
 }
 
 function renderGroupList(groups) {
-  // Remove existing group list if any
   let groupSection = $('#group-list-section');
   if (!groupSection) {
-    // Create group section in sidebar, after user-list
     groupSection = document.createElement('div');
     groupSection.id = 'group-list-section';
     groupSection.className = 'group-list-section';
@@ -1530,11 +1936,12 @@ function renderGroupList(groups) {
 
 async function selectGroup(groupId, name) {
   selectedGroupId = groupId;
-  selectedUserId = null; // Deselect DM
+  selectedUserId = null;
+  hasMoreMessages = true;
+  oldestMessageId = null;
+  clearReply();
 
-  // Deselect users
   $$('.user-item').forEach(item => item.classList.remove('active'));
-  // Select group
   $$('.group-item').forEach(item => {
     item.classList.toggle('active', parseInt(item.dataset.groupId) === groupId);
   });
@@ -1543,8 +1950,8 @@ async function selectGroup(groupId, name) {
   $('#chat-box').classList.remove('hidden');
   $('#chat-with-name').textContent = name;
 
-  // Set group avatar
   const chatAvatar = $('#chat-avatar');
+  chatAvatar.style.backgroundImage = '';
   chatAvatar.style.background = getColor(name);
   chatAvatar.textContent = '👥';
   chatAvatar.className = 'user-avatar';
@@ -1553,11 +1960,9 @@ async function selectGroup(groupId, name) {
   statusEl.textContent = 'Nhóm chat';
   statusEl.className = 'status-text';
 
-  // Hide block button for groups
   const blockBtn = $('#block-btn');
   if (blockBtn) blockBtn.classList.add('hidden');
 
-  // Mobile: hide sidebar and show chat
   if (document.body.classList.contains('mobile')) {
     $('.sidebar').classList.add('sidebar-hidden');
     $('.chat-area').classList.add('chat-visible');
@@ -1566,8 +1971,15 @@ async function selectGroup(groupId, name) {
   $('#messages').innerHTML = '';
 
   try {
-    const res = await authFetch(`/api/groups/${groupId}/messages`);
+    const res = await authFetch(`/api/groups/${groupId}/messages?limit=50`);
     const messages = await res.json();
+
+    if (messages.length > 0) {
+      oldestMessageId = messages[0].id;
+      hasMoreMessages = messages.length >= 50;
+    } else {
+      hasMoreMessages = false;
+    }
 
     let lastDate = '';
     messages.forEach(msg => {
@@ -1590,68 +2002,44 @@ async function selectGroup(groupId, name) {
 }
 
 function createGroup() {
-  // Build modal
   const existing = $('#create-group-modal');
   if (existing) existing.remove();
 
   const modal = document.createElement('div');
   modal.id = 'create-group-modal';
-  modal.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:9999;display:flex;align-items:center;justify-content:center;';
-
-  const dialog = document.createElement('div');
-  dialog.style.cssText = 'background:var(--bg-primary, #fff);border-radius:12px;padding:24px;min-width:300px;max-width:400px;max-height:80vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,0.2);';
+  modal.className = 'modal-overlay';
 
   let userCheckboxes = '';
   allUsers.forEach(u => {
-    if (u.id !== currentUser.id) {
+    if (u.id !== currentUser.id && u.role !== 'bot') {
       const displayName = u.nickname || u.display_name || u.username;
-      userCheckboxes += `
-        <label style="display:flex;align-items:center;gap:8px;padding:6px 0;cursor:pointer;">
-          <input type="checkbox" value="${u.id}" class="group-user-cb" />
-          <span>${escapeHtml(displayName)}</span>
-        </label>
-      `;
+      userCheckboxes += `<label style="display:flex;align-items:center;gap:8px;padding:6px 0;cursor:pointer;"><input type="checkbox" value="${u.id}" class="group-user-cb" /><span>${escapeHtml(displayName)}</span></label>`;
     }
   });
 
-  dialog.innerHTML = `
-    <h3 style="margin:0 0 16px;font-size:18px;">Tạo nhóm chat</h3>
-    <input type="text" id="group-name-input" placeholder="Tên nhóm..." style="width:100%;padding:10px;border:1px solid var(--border-color, #ddd);border-radius:8px;margin-bottom:12px;background:var(--bg-secondary, #f5f5f5);color:var(--text-primary, #333);box-sizing:border-box;" />
-    <div style="margin-bottom:12px;font-weight:600;font-size:14px;">Chọn thành viên:</div>
-    <div style="max-height:200px;overflow-y:auto;margin-bottom:16px;">
-      ${userCheckboxes || '<p style="color:#999;font-size:13px;">Không có người dùng khả dụng</p>'}
-    </div>
-    <div style="display:flex;gap:8px;justify-content:flex-end;">
-      <button id="cancel-group-btn" style="padding:8px 16px;border:1px solid var(--border-color, #ddd);border-radius:8px;background:transparent;cursor:pointer;color:var(--text-primary, #333);">Hủy</button>
-      <button id="confirm-group-btn" style="padding:8px 16px;border:none;border-radius:8px;background:var(--primary, #5b5ea6);color:#fff;cursor:pointer;">Tạo nhóm</button>
+  modal.innerHTML = `
+    <div class="modal">
+      <h3>Tạo nhóm chat</h3>
+      <input type="text" id="group-name-input" placeholder="Tên nhóm..." />
+      <div style="margin-bottom:12px;font-weight:600;font-size:14px;">Chọn thành viên:</div>
+      <div style="max-height:200px;overflow-y:auto;margin-bottom:16px;">${userCheckboxes || '<p style="color:#999;font-size:13px;">Không có người dùng khả dụng</p>'}</div>
+      <div class="modal-actions">
+        <button class="btn-cancel" id="cancel-group-btn">Hủy</button>
+        <button class="btn-primary" id="confirm-group-btn">Tạo nhóm</button>
+      </div>
     </div>
   `;
 
-  modal.appendChild(dialog);
   document.body.appendChild(modal);
+  modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
+  modal.querySelector('#cancel-group-btn').addEventListener('click', () => modal.remove());
 
-  modal.addEventListener('click', (e) => {
-    if (e.target === modal) modal.remove();
-  });
-
-  dialog.querySelector('#cancel-group-btn').addEventListener('click', () => modal.remove());
-
-  dialog.querySelector('#confirm-group-btn').addEventListener('click', async () => {
-    const name = dialog.querySelector('#group-name-input').value.trim();
-    if (!name) {
-      alert('Vui lòng nhập tên nhóm');
-      return;
-    }
-
+  modal.querySelector('#confirm-group-btn').addEventListener('click', async () => {
+    const name = modal.querySelector('#group-name-input').value.trim();
+    if (!name) { alert('Vui lòng nhập tên nhóm'); return; }
     const selectedIds = [];
-    dialog.querySelectorAll('.group-user-cb:checked').forEach(cb => {
-      selectedIds.push(parseInt(cb.value));
-    });
-
-    if (selectedIds.length === 0) {
-      alert('Vui lòng chọn ít nhất 1 thành viên');
-      return;
-    }
+    modal.querySelectorAll('.group-user-cb:checked').forEach(cb => selectedIds.push(parseInt(cb.value)));
+    if (selectedIds.length === 0) { alert('Vui lòng chọn ít nhất 1 thành viên'); return; }
 
     try {
       const res = await authFetch('/api/groups', {
@@ -1740,45 +2128,25 @@ function renderAdminUsers(users) {
 
     let actions = '';
     if (!isSelf) {
-      if (user.is_banned) {
-        actions += `<button class="admin-action-btn unban-btn" data-user-id="${user.id}" title="Bỏ cấm">Bỏ cấm</button>`;
-      } else {
-        actions += `<button class="admin-action-btn ban-btn" data-user-id="${user.id}" title="Cấm">Cấm</button>`;
-      }
-
-      if (user.role === 'admin') {
-        actions += `<button class="admin-action-btn role-btn" data-user-id="${user.id}" data-role="user" title="Hạ xuống User">Hạ quyền</button>`;
-      } else {
-        actions += `<button class="admin-action-btn role-btn" data-user-id="${user.id}" data-role="admin" title="Nâng lên Admin">Nâng quyền</button>`;
-      }
-
-      actions += `<button class="admin-action-btn delete-btn" data-user-id="${user.id}" title="Xoá người dùng">Xoá</button>`;
+      if (user.is_banned) actions += `<button class="admin-action-btn unban-btn" data-user-id="${user.id}">Bỏ cấm</button>`;
+      else actions += `<button class="admin-action-btn ban-btn" data-user-id="${user.id}">Cấm</button>`;
+      if (user.role === 'admin') actions += `<button class="admin-action-btn role-btn" data-user-id="${user.id}" data-role="user">Hạ quyền</button>`;
+      else actions += `<button class="admin-action-btn role-btn" data-user-id="${user.id}" data-role="admin">Nâng quyền</button>`;
+      actions += `<button class="admin-action-btn delete-btn" data-user-id="${user.id}">Xoá</button>`;
     } else {
       actions = '<span class="admin-self-label">Bạn</span>';
     }
 
-    tr.innerHTML = `
-      <td>${escapeHtml(user.username)}</td>
-      <td>${roleBadge}</td>
-      <td>${statusBadge}</td>
-      <td>${user.message_count || 0}</td>
-      <td class="admin-actions">${actions}</td>
-    `;
-
+    tr.innerHTML = `<td>${escapeHtml(user.username)}</td><td>${roleBadge}</td><td>${statusBadge}</td><td>${user.message_count || 0}</td><td class="admin-actions">${actions}</td>`;
     tbody.appendChild(tr);
 
     if (!isSelf) {
       const banBtn = tr.querySelector('.ban-btn');
       if (banBtn) banBtn.addEventListener('click', () => adminBanUser(user.id));
-
       const unbanBtn = tr.querySelector('.unban-btn');
       if (unbanBtn) unbanBtn.addEventListener('click', () => adminUnbanUser(user.id));
-
       const roleBtn = tr.querySelector('.role-btn');
-      if (roleBtn) roleBtn.addEventListener('click', () => {
-        adminChangeRole(user.id, roleBtn.dataset.role);
-      });
-
+      if (roleBtn) roleBtn.addEventListener('click', () => adminChangeRole(user.id, roleBtn.dataset.role));
       const deleteBtn = tr.querySelector('.delete-btn');
       if (deleteBtn) deleteBtn.addEventListener('click', () => adminDeleteUser(user.id, user.username));
     }
@@ -1789,7 +2157,7 @@ async function adminBanUser(userId) {
   try {
     const res = await authFetch(`/api/admin/ban/${userId}`, { method: 'POST' });
     if (res.ok) { loadAdminStats(); loadAdminUsers(); loadUsers(); }
-    else { const d = await res.json(); alert(d.error || 'Không thể cấm người dùng'); }
+    else { const d = await res.json(); alert(d.error); }
   } catch (err) { if (err.message !== 'Unauthorized') alert('Lỗi kết nối server'); }
 }
 
@@ -1797,7 +2165,7 @@ async function adminUnbanUser(userId) {
   try {
     const res = await authFetch(`/api/admin/unban/${userId}`, { method: 'POST' });
     if (res.ok) { loadAdminStats(); loadAdminUsers(); loadUsers(); }
-    else { const d = await res.json(); alert(d.error || 'Không thể bỏ cấm người dùng'); }
+    else { const d = await res.json(); alert(d.error); }
   } catch (err) { if (err.message !== 'Unauthorized') alert('Lỗi kết nối server'); }
 }
 
@@ -1809,37 +2177,29 @@ async function adminChangeRole(userId, newRole) {
       body: JSON.stringify({ role: newRole })
     });
     if (res.ok) { loadAdminUsers(); loadUsers(); }
-    else { const d = await res.json(); alert(d.error || 'Không thể đổi vai trò'); }
+    else { const d = await res.json(); alert(d.error); }
   } catch (err) { if (err.message !== 'Unauthorized') alert('Lỗi kết nối server'); }
 }
 
 async function adminDeleteUser(userId, username) {
-  if (!confirm(`Bạn có chắc muốn xoá người dùng "${username}"? Hành động này không thể hoàn tác.`)) return;
+  if (!confirm(`Xoá người dùng "${username}"? Không thể hoàn tác.`)) return;
   try {
     const res = await authFetch(`/api/admin/users/${userId}`, { method: 'DELETE' });
     if (res.ok) {
-      if (selectedUserId === userId) {
-        selectedUserId = null;
-        $('#chat-box').classList.add('hidden');
-        $('#no-chat').classList.remove('hidden');
-      }
+      if (selectedUserId === userId) { selectedUserId = null; $('#chat-box').classList.add('hidden'); $('#no-chat').classList.remove('hidden'); }
       loadAdminStats(); loadAdminUsers(); loadUsers();
-    } else { const d = await res.json(); alert(d.error || 'Không thể xoá người dùng'); }
+    } else { const d = await res.json(); alert(d.error); }
   } catch (err) { if (err.message !== 'Unauthorized') alert('Lỗi kết nối server'); }
 }
 
 // ---- MOBILE RESPONSIVE ----
 
 function initMobile() {
-  // Add mobile class based on viewport
-  if (window.innerWidth <= 768) {
-    document.body.classList.add('mobile');
-  }
+  if (window.innerWidth <= 768) document.body.classList.add('mobile');
   window.addEventListener('resize', () => {
     document.body.classList.toggle('mobile', window.innerWidth <= 768);
   });
 
-  // Create hamburger button (inserted into chat-area header when mobile)
   const hamburger = document.createElement('button');
   hamburger.id = 'mobile-hamburger';
   hamburger.className = 'icon-btn mobile-only-btn';
@@ -1850,7 +2210,6 @@ function initMobile() {
     $('.chat-area').classList.remove('chat-visible');
   });
 
-  // Insert hamburger into no-chat area
   const noChat = $('#no-chat');
   if (noChat) {
     const noChatHamburger = hamburger.cloneNode(true);
@@ -1863,7 +2222,6 @@ function initMobile() {
     noChat.appendChild(noChatHamburger);
   }
 
-  // Create back button in chat header
   const backBtn = document.createElement('button');
   backBtn.id = 'mobile-back-btn';
   backBtn.className = 'icon-btn mobile-only-btn';
@@ -1874,13 +2232,9 @@ function initMobile() {
     $('.chat-area').classList.remove('chat-visible');
   });
 
-  // Insert back button at the start of chat header
   const chatHeader = $('.chat-header');
-  if (chatHeader) {
-    chatHeader.insertBefore(backBtn, chatHeader.firstChild);
-  }
+  if (chatHeader) chatHeader.insertBefore(backBtn, chatHeader.firstChild);
 
-  // Create "+" button for creating groups near search box
   const searchBox = $('.search-box');
   if (searchBox) {
     const createGroupBtn = document.createElement('button');
@@ -1901,6 +2255,10 @@ function initMobile() {
 initEmojiPicker();
 initEmojiSuggest();
 initImageUpload();
+initFileUpload();
+initInfiniteScroll();
+initMessageSearch();
+initProfile();
 setInterval(loadUsers, 10000);
 checkAuth();
 initMobile();

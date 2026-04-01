@@ -103,6 +103,25 @@ async function initDB() {
     CREATE INDEX IF NOT EXISTS idx_group_messages ON group_messages(group_id);
   `);
 
+  // --- NEW: Edit/Delete support ---
+  await pool.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS is_deleted INTEGER DEFAULT 0`);
+  await pool.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS is_edited INTEGER DEFAULT 0`);
+  await pool.query(`ALTER TABLE group_messages ADD COLUMN IF NOT EXISTS is_deleted INTEGER DEFAULT 0`);
+  await pool.query(`ALTER TABLE group_messages ADD COLUMN IF NOT EXISTS is_edited INTEGER DEFAULT 0`);
+
+  // --- NEW: Reply support ---
+  await pool.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_to INTEGER REFERENCES messages(id) ON DELETE SET NULL`);
+  await pool.query(`ALTER TABLE group_messages ADD COLUMN IF NOT EXISTS reply_to INTEGER REFERENCES group_messages(id) ON DELETE SET NULL`);
+
+  // --- NEW: Avatar support ---
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar TEXT`);
+
+  // --- NEW: File upload support ---
+  await pool.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS file_name TEXT`);
+  await pool.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS file_type TEXT`);
+  await pool.query(`ALTER TABLE group_messages ADD COLUMN IF NOT EXISTS file_name TEXT`);
+  await pool.query(`ALTER TABLE group_messages ADD COLUMN IF NOT EXISTS file_type TEXT`);
+
   // Promote first user to admin if none exists
   const { rows: admins } = await pool.query("SELECT id FROM users WHERE role = 'admin' LIMIT 1");
   if (admins.length === 0) {
@@ -116,7 +135,6 @@ async function initDB() {
   const { rows: bots } = await pool.query("SELECT id FROM users WHERE username = $1", [BOT_USERNAME]);
   if (bots.length > 0) {
     BOT_ID = bots[0].id;
-    // Ensure bot has display_name set
     await pool.query("UPDATE users SET display_name = 'AI Bot' WHERE id = $1 AND display_name IS NULL", [BOT_ID]);
   } else {
     const hash = bcrypt.hashSync(crypto.randomBytes(32).toString('hex'), 10);
@@ -171,7 +189,7 @@ const sessionMiddleware = session({
 
 app.set('trust proxy', 1);
 app.use(sessionMiddleware);
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({ limit: '5mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 // Auth tokens
@@ -261,7 +279,7 @@ app.post('/api/login', async (req, res) => {
   req.session.userId = user.id;
   req.session.username = user.username;
   const token = createAuthToken(user.id, user.username);
-  res.json({ id: user.id, username: user.username, role: user.role, display_name: user.display_name, token });
+  res.json({ id: user.id, username: user.username, role: user.role, display_name: user.display_name, avatar: user.avatar, token });
 });
 
 app.post('/api/logout', (req, res) => {
@@ -278,44 +296,92 @@ app.get('/api/me', async (req, res) => {
   else if (req.session.userId) userId = req.session.userId;
   if (!userId) return res.status(401).json({ error: 'Chưa đăng nhập' });
 
-  const { rows } = await pool.query('SELECT id, username, role, is_banned, display_name FROM users WHERE id = $1', [userId]);
+  const { rows } = await pool.query('SELECT id, username, role, is_banned, display_name, avatar FROM users WHERE id = $1', [userId]);
   const user = rows[0];
   if (!user || user.is_banned) {
     if (req.session) req.session.destroy();
     return res.status(401).json({ error: 'Tài khoản đã bị khóa' });
   }
   const token = createAuthToken(user.id, user.username);
-  res.json({ id: user.id, username: user.username, role: user.role, display_name: user.display_name, token });
+  res.json({ id: user.id, username: user.username, role: user.role, display_name: user.display_name, avatar: user.avatar, token });
+});
+
+// --- PROFILE ROUTES ---
+
+app.put('/api/profile', requireAuth, async (req, res) => {
+  const { displayName, avatar } = req.body;
+  if (displayName !== undefined) {
+    await pool.query('UPDATE users SET display_name = $1 WHERE id = $2', [displayName.trim() || null, req.userId]);
+  }
+  if (avatar !== undefined) {
+    // avatar is base64 data URL or null to remove
+    if (avatar && avatar.length > 200000) return res.status(400).json({ error: 'Avatar quá lớn (tối đa ~150KB)' });
+    await pool.query('UPDATE users SET avatar = $1 WHERE id = $2', [avatar || null, req.userId]);
+  }
+  const { rows } = await pool.query('SELECT id, username, role, display_name, avatar FROM users WHERE id = $1', [req.userId]);
+  res.json(rows[0]);
 });
 
 // --- USER & MESSAGE ROUTES ---
 
 app.get('/api/users', requireAuth, async (req, res) => {
   const { rows: users } = await pool.query(`
-    SELECT u.id, u.username, u.display_name, u.role, u.last_seen,
+    SELECT u.id, u.username, u.display_name, u.role, u.last_seen, u.avatar,
       n.nickname
     FROM users u
     LEFT JOIN nicknames n ON n.target_id = u.id AND n.user_id = $1
     WHERE u.id != $1 AND u.is_banned = 0 AND u.role != 'bot'
       AND u.id NOT IN (SELECT blocked_id FROM blocked_users WHERE user_id = $1)
   `, [req.userId]);
-  users.unshift({ id: BOT_ID, username: BOT_USERNAME, display_name: 'AI Bot', role: 'bot', nickname: null, last_seen: null });
+  users.unshift({ id: BOT_ID, username: BOT_USERNAME, display_name: 'AI Bot', role: 'bot', nickname: null, last_seen: null, avatar: null });
   res.json(users);
 });
 
 app.get('/api/messages/:userId', requireAuth, async (req, res) => {
   const otherId = parseInt(req.params.userId);
-  const { rows: messages } = await pool.query(`
-    SELECT m.*, u1.username as sender_name, u1.display_name as sender_display_name,
-      u2.username as receiver_name
-    FROM messages m
-    JOIN users u1 ON m.sender_id = u1.id
-    JOIN users u2 ON m.receiver_id = u2.id
-    WHERE (m.sender_id = $1 AND m.receiver_id = $2)
-       OR (m.sender_id = $2 AND m.receiver_id = $1)
-    ORDER BY m.created_at ASC
-    LIMIT 200
-  `, [req.userId, otherId]);
+  const before = req.query.before ? parseInt(req.query.before) : null;
+  const limit = Math.min(parseInt(req.query.limit) || 50, 100);
+
+  let query, params;
+  if (before) {
+    query = `
+      SELECT m.*, u1.username as sender_name, u1.display_name as sender_display_name,
+        u2.username as receiver_name,
+        rm.content as reply_content, rm.sender_id as reply_sender_id,
+        ru.username as reply_sender_name
+      FROM messages m
+      JOIN users u1 ON m.sender_id = u1.id
+      JOIN users u2 ON m.receiver_id = u2.id
+      LEFT JOIN messages rm ON m.reply_to = rm.id
+      LEFT JOIN users ru ON rm.sender_id = ru.id
+      WHERE ((m.sender_id = $1 AND m.receiver_id = $2)
+         OR (m.sender_id = $2 AND m.receiver_id = $1))
+        AND m.id < $3
+      ORDER BY m.created_at DESC
+      LIMIT $4
+    `;
+    params = [req.userId, otherId, before, limit];
+  } else {
+    query = `
+      SELECT m.*, u1.username as sender_name, u1.display_name as sender_display_name,
+        u2.username as receiver_name,
+        rm.content as reply_content, rm.sender_id as reply_sender_id,
+        ru.username as reply_sender_name
+      FROM messages m
+      JOIN users u1 ON m.sender_id = u1.id
+      JOIN users u2 ON m.receiver_id = u2.id
+      LEFT JOIN messages rm ON m.reply_to = rm.id
+      LEFT JOIN users ru ON rm.sender_id = ru.id
+      WHERE (m.sender_id = $1 AND m.receiver_id = $2)
+         OR (m.sender_id = $2 AND m.receiver_id = $1)
+      ORDER BY m.created_at DESC
+      LIMIT $3
+    `;
+    params = [req.userId, otherId, limit];
+  }
+
+  const { rows: messagesDesc } = await pool.query(query, params);
+  const messages = messagesDesc.reverse();
 
   const msgIds = messages.map(m => m.id);
   if (msgIds.length > 0) {
@@ -333,6 +399,53 @@ app.get('/api/messages/:userId', requireAuth, async (req, res) => {
     });
     messages.forEach(m => { m.reactions = reactMap[m.id] || []; });
   }
+
+  res.json(messages);
+});
+
+// --- Message Search ---
+
+app.get('/api/messages/search/:userId', requireAuth, async (req, res) => {
+  const otherId = parseInt(req.params.userId);
+  const q = (req.query.q || '').trim();
+  if (!q || q.length < 2) return res.json([]);
+
+  const { rows: messages } = await pool.query(`
+    SELECT m.id, m.sender_id, m.receiver_id, m.content, m.created_at, m.is_deleted,
+      u1.username as sender_name, u1.display_name as sender_display_name
+    FROM messages m
+    JOIN users u1 ON m.sender_id = u1.id
+    WHERE ((m.sender_id = $1 AND m.receiver_id = $2) OR (m.sender_id = $2 AND m.receiver_id = $1))
+      AND m.is_deleted = 0
+      AND LOWER(m.content) LIKE $3
+    ORDER BY m.created_at DESC
+    LIMIT 50
+  `, [req.userId, otherId, `%${q.toLowerCase()}%`]);
+
+  res.json(messages);
+});
+
+app.get('/api/groups/:groupId/messages/search', requireAuth, async (req, res) => {
+  const groupId = parseInt(req.params.groupId);
+  const q = (req.query.q || '').trim();
+  if (!q || q.length < 2) return res.json([]);
+
+  const { rows: membership } = await pool.query(
+    'SELECT 1 FROM group_members WHERE group_id = $1 AND user_id = $2',
+    [groupId, req.userId]
+  );
+  if (membership.length === 0) return res.status(403).json({ error: 'Không phải thành viên' });
+
+  const { rows: messages } = await pool.query(`
+    SELECT gm.id, gm.group_id, gm.sender_id, gm.content, gm.created_at, gm.is_deleted,
+      u.username as sender_name, u.display_name as sender_display_name
+    FROM group_messages gm
+    JOIN users u ON gm.sender_id = u.id
+    WHERE gm.group_id = $1 AND gm.is_deleted = 0
+      AND LOWER(gm.content) LIKE $2
+    ORDER BY gm.created_at DESC
+    LIMIT 50
+  `, [groupId, `%${q.toLowerCase()}%`]);
 
   res.json(messages);
 });
@@ -410,10 +523,8 @@ app.post('/api/groups', requireAuth, async (req, res) => {
   );
   const group = rows[0];
 
-  // Add creator as member
   await pool.query('INSERT INTO group_members (group_id, user_id) VALUES ($1, $2)', [group.id, req.userId]);
 
-  // Add other members
   if (memberIds && Array.isArray(memberIds)) {
     for (const memberId of memberIds) {
       if (memberId !== req.userId) {
@@ -441,24 +552,52 @@ app.get('/api/groups', requireAuth, async (req, res) => {
 
 app.get('/api/groups/:groupId/messages', requireAuth, async (req, res) => {
   const groupId = parseInt(req.params.groupId);
+  const before = req.query.before ? parseInt(req.query.before) : null;
+  const limit = Math.min(parseInt(req.query.limit) || 50, 100);
 
-  // Verify user is a member
   const { rows: membership } = await pool.query(
     'SELECT 1 FROM group_members WHERE group_id = $1 AND user_id = $2',
     [groupId, req.userId]
   );
   if (membership.length === 0) return res.status(403).json({ error: 'Bạn không phải thành viên nhóm này' });
 
-  const { rows: messages } = await pool.query(`
-    SELECT gm.id, gm.group_id, gm.sender_id, gm.content, gm.created_at,
-      u.username as sender_name, u.display_name as sender_display_name
-    FROM group_messages gm
-    JOIN users u ON gm.sender_id = u.id
-    WHERE gm.group_id = $1
-    ORDER BY gm.created_at ASC
-    LIMIT 200
-  `, [groupId]);
+  let query, params;
+  if (before) {
+    query = `
+      SELECT gm.id, gm.group_id, gm.sender_id, gm.content, gm.created_at,
+        gm.is_deleted, gm.is_edited, gm.file_name, gm.file_type,
+        u.username as sender_name, u.display_name as sender_display_name,
+        rm.content as reply_content, rm.sender_id as reply_sender_id,
+        ru.username as reply_sender_name
+      FROM group_messages gm
+      JOIN users u ON gm.sender_id = u.id
+      LEFT JOIN group_messages rm ON gm.reply_to = rm.id
+      LEFT JOIN users ru ON rm.sender_id = ru.id
+      WHERE gm.group_id = $1 AND gm.id < $2
+      ORDER BY gm.created_at DESC
+      LIMIT $3
+    `;
+    params = [groupId, before, limit];
+  } else {
+    query = `
+      SELECT gm.id, gm.group_id, gm.sender_id, gm.content, gm.created_at,
+        gm.is_deleted, gm.is_edited, gm.file_name, gm.file_type,
+        u.username as sender_name, u.display_name as sender_display_name,
+        rm.content as reply_content, rm.sender_id as reply_sender_id,
+        ru.username as reply_sender_name
+      FROM group_messages gm
+      JOIN users u ON gm.sender_id = u.id
+      LEFT JOIN group_messages rm ON gm.reply_to = rm.id
+      LEFT JOIN users ru ON rm.sender_id = ru.id
+      WHERE gm.group_id = $1
+      ORDER BY gm.created_at DESC
+      LIMIT $2
+    `;
+    params = [groupId, limit];
+  }
 
+  const { rows: messagesDesc } = await pool.query(query, params);
+  const messages = messagesDesc.reverse();
   res.json(messages);
 });
 
@@ -467,7 +606,6 @@ app.post('/api/groups/:groupId/members', requireAuth, async (req, res) => {
   const { userId } = req.body;
   if (!userId) return res.status(400).json({ error: 'Thiếu userId' });
 
-  // Verify requester is a member
   const { rows: membership } = await pool.query(
     'SELECT 1 FROM group_members WHERE group_id = $1 AND user_id = $2',
     [groupId, req.userId]
@@ -485,7 +623,6 @@ app.delete('/api/groups/:groupId/members/:userId', requireAuth, async (req, res)
   const groupId = parseInt(req.params.groupId);
   const targetUserId = parseInt(req.params.userId);
 
-  // Verify requester is a member
   const { rows: membership } = await pool.query(
     'SELECT 1 FROM group_members WHERE group_id = $1 AND user_id = $2',
     [groupId, req.userId]
@@ -601,7 +738,7 @@ io.on('connection', async (socket) => {
   broadcastOnline();
 
   socket.on('send_message', async (data, callback) => {
-    const { receiverId, content, tempId } = data;
+    const { receiverId, content, tempId, replyTo, fileName, fileType } = data;
     if (!content || !content.trim() || !receiverId) return;
 
     const { rows: blocked } = await pool.query(
@@ -614,15 +751,28 @@ io.on('connection', async (socket) => {
       return;
     }
 
-    const sanitized = content.trim().slice(0, 2000);
+    const sanitized = content.trim().slice(0, 500000);
     const { rows: inserted } = await pool.query(
-      'INSERT INTO messages (sender_id, receiver_id, content) VALUES ($1, $2, $3) RETURNING id',
-      [userId, receiverId, sanitized]
+      'INSERT INTO messages (sender_id, receiver_id, content, reply_to, file_name, file_type) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id',
+      [userId, receiverId, sanitized, replyTo || null, fileName || null, fileType || null]
     );
 
-    // Fetch sender's display_name
     const { rows: senderRows } = await pool.query('SELECT display_name FROM users WHERE id = $1', [userId]);
     const senderDisplayName = senderRows[0]?.display_name || null;
+
+    // Fetch reply info if exists
+    let replyContent = null, replySenderId = null, replySenderName = null;
+    if (replyTo) {
+      const { rows: replyRows } = await pool.query(
+        'SELECT m.content, m.sender_id, u.username as sender_name FROM messages m JOIN users u ON m.sender_id = u.id WHERE m.id = $1',
+        [replyTo]
+      );
+      if (replyRows[0]) {
+        replyContent = replyRows[0].content;
+        replySenderId = replyRows[0].sender_id;
+        replySenderName = replyRows[0].sender_name;
+      }
+    }
 
     const message = {
       id: inserted[0].id,
@@ -631,7 +781,13 @@ io.on('connection', async (socket) => {
       sender_name: username,
       sender_display_name: senderDisplayName,
       content: sanitized,
-      created_at: new Date().toISOString()
+      created_at: new Date().toISOString(),
+      reply_to: replyTo || null,
+      reply_content: replyContent,
+      reply_sender_id: replySenderId,
+      reply_sender_name: replySenderName,
+      file_name: fileName || null,
+      file_type: fileType || null
     };
 
     if (callback) callback({ success: true, messageId: inserted[0].id, tempId });
@@ -658,6 +814,49 @@ io.on('connection', async (socket) => {
     } else {
       const receiverSockets = onlineUsers.get(receiverId);
       if (receiverSockets) receiverSockets.forEach(sid => io.to(sid).emit('new_message', message));
+    }
+  });
+
+  // --- Edit message ---
+  socket.on('edit_message', async (data) => {
+    const { messageId, content, isGroup } = data;
+    if (!messageId || !content || !content.trim()) return;
+    const sanitized = content.trim().slice(0, 2000);
+
+    if (isGroup) {
+      const { rows } = await pool.query('SELECT sender_id, group_id FROM group_messages WHERE id = $1', [messageId]);
+      if (!rows[0] || rows[0].sender_id !== userId) return;
+      await pool.query('UPDATE group_messages SET content = $1, is_edited = 1 WHERE id = $2', [sanitized, messageId]);
+      io.to(`group_${rows[0].group_id}`).emit('message_edited', { messageId, content: sanitized, isGroup: true });
+    } else {
+      const { rows } = await pool.query('SELECT sender_id, receiver_id FROM messages WHERE id = $1', [messageId]);
+      if (!rows[0] || rows[0].sender_id !== userId) return;
+      await pool.query('UPDATE messages SET content = $1, is_edited = 1 WHERE id = $2', [sanitized, messageId]);
+      const event = { messageId, content: sanitized, isGroup: false };
+      socket.emit('message_edited', event);
+      const otherSockets = onlineUsers.get(rows[0].receiver_id);
+      if (otherSockets) otherSockets.forEach(sid => io.to(sid).emit('message_edited', event));
+    }
+  });
+
+  // --- Delete message ---
+  socket.on('delete_message', async (data) => {
+    const { messageId, isGroup } = data;
+    if (!messageId) return;
+
+    if (isGroup) {
+      const { rows } = await pool.query('SELECT sender_id, group_id FROM group_messages WHERE id = $1', [messageId]);
+      if (!rows[0] || rows[0].sender_id !== userId) return;
+      await pool.query("UPDATE group_messages SET is_deleted = 1, content = 'Tin nhắn đã bị xóa' WHERE id = $1", [messageId]);
+      io.to(`group_${rows[0].group_id}`).emit('message_deleted', { messageId, isGroup: true });
+    } else {
+      const { rows } = await pool.query('SELECT sender_id, receiver_id FROM messages WHERE id = $1', [messageId]);
+      if (!rows[0] || rows[0].sender_id !== userId) return;
+      await pool.query("UPDATE messages SET is_deleted = 1, content = 'Tin nhắn đã bị xóa' WHERE id = $1", [messageId]);
+      const event = { messageId, isGroup: false };
+      socket.emit('message_deleted', event);
+      const otherSockets = onlineUsers.get(rows[0].receiver_id);
+      if (otherSockets) otherSockets.forEach(sid => io.to(sid).emit('message_deleted', event));
     }
   });
 
@@ -702,7 +901,6 @@ io.on('connection', async (socket) => {
     if (receiverSockets) receiverSockets.forEach(sid => io.to(sid).emit('user_typing', { userId, username }));
   });
 
-  // --- Read Receipts socket event ---
   socket.on('mark_read', async (data) => {
     const { senderId } = data;
     if (!senderId) return;
@@ -712,33 +910,43 @@ io.on('connection', async (socket) => {
       [senderId, userId]
     );
 
-    // Notify the sender that their messages were read
     const senderSockets = onlineUsers.get(senderId);
     if (senderSockets) {
       senderSockets.forEach(sid => io.to(sid).emit('messages_read', { readBy: userId }));
     }
   });
 
-  // --- Group Chat socket event ---
-  socket.on('send_group_message', async (data) => {
-    const { groupId, content } = data;
+  socket.on('send_group_message', async (data, callback) => {
+    const { groupId, content, replyTo, fileName, fileType } = data;
     if (!groupId || !content || !content.trim()) return;
 
-    // Verify sender is a member
     const { rows: membership } = await pool.query(
       'SELECT 1 FROM group_members WHERE group_id = $1 AND user_id = $2',
       [groupId, userId]
     );
     if (membership.length === 0) return;
 
-    const sanitized = content.trim().slice(0, 2000);
+    const sanitized = content.trim().slice(0, 500000);
     const { rows: inserted } = await pool.query(
-      'INSERT INTO group_messages (group_id, sender_id, content) VALUES ($1, $2, $3) RETURNING id, created_at',
-      [groupId, userId, sanitized]
+      'INSERT INTO group_messages (group_id, sender_id, content, reply_to, file_name, file_type) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, created_at',
+      [groupId, userId, sanitized, replyTo || null, fileName || null, fileType || null]
     );
 
     const { rows: senderRows } = await pool.query('SELECT display_name FROM users WHERE id = $1', [userId]);
     const senderDisplayName = senderRows[0]?.display_name || null;
+
+    let replyContent = null, replySenderId = null, replySenderName = null;
+    if (replyTo) {
+      const { rows: replyRows } = await pool.query(
+        'SELECT gm.content, gm.sender_id, u.username as sender_name FROM group_messages gm JOIN users u ON gm.sender_id = u.id WHERE gm.id = $1',
+        [replyTo]
+      );
+      if (replyRows[0]) {
+        replyContent = replyRows[0].content;
+        replySenderId = replyRows[0].sender_id;
+        replySenderName = replyRows[0].sender_name;
+      }
+    }
 
     const message = {
       id: inserted[0].id,
@@ -747,10 +955,17 @@ io.on('connection', async (socket) => {
       sender_name: username,
       sender_display_name: senderDisplayName,
       content: sanitized,
-      created_at: inserted[0].created_at
+      created_at: inserted[0].created_at,
+      reply_to: replyTo || null,
+      reply_content: replyContent,
+      reply_sender_id: replySenderId,
+      reply_sender_name: replySenderName,
+      file_name: fileName || null,
+      file_type: fileType || null
     };
 
-    // Emit to all online group members
+    if (callback) callback({ success: true, messageId: inserted[0].id });
+
     io.to(`group_${groupId}`).emit('new_group_message', message);
   });
 
@@ -760,7 +975,6 @@ io.on('connection', async (socket) => {
       sockets.delete(socket.id);
       if (sockets.size === 0) {
         onlineUsers.delete(userId);
-        // Save last_seen when user fully disconnects
         await pool.query('UPDATE users SET last_seen = NOW() WHERE id = $1', [userId]);
       }
     }
