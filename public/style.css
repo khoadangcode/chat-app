@@ -21,6 +21,29 @@
   --danger: #ef4444;
 }
 
+/* ---- DARK MODE VARIABLES ---- */
+[data-theme="dark"] {
+  --primary: #7c7fbf;
+  --primary-light: #9b9ed4;
+  --primary-dark: #5b5ea6;
+  --bg: #1a1a2e;
+  --sidebar-bg: #16213e;
+  --chat-bg: #0f3460;
+  --white: #1e293b;
+  --text: #e2e8f0;
+  --text-light: #94a3b8;
+  --border: #334155;
+  --sent: #5b5ea6;
+  --received: #1e293b;
+  --online: #22c55e;
+  --danger: #ef4444;
+}
+
+/* ---- SMOOTH THEME TRANSITIONS ---- */
+body, .sidebar, .chat-area, .message, .auth-container, input, button {
+  transition: background-color 0.3s, color 0.3s, border-color 0.3s;
+}
+
 body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   background: var(--bg);
@@ -36,6 +59,18 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
+  background: linear-gradient(135deg, #5b5ea6 0%, #3d85c6 50%, #81b29a 100%);
+}
+
+/* ---- DARK MODE AUTH SCREEN ---- */
+[data-theme="dark"] .screen {
+  background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+}
+
+/* ---- FLOATING ANIMATION ---- */
+@keyframes float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-10px); }
 }
 
 /* ---- AUTH ---- */
@@ -46,6 +81,23 @@ body {
   box-shadow: 0 4px 24px rgba(0,0,0,0.08);
   width: 380px;
   text-align: center;
+  backdrop-filter: blur(10px);
+  animation: authSlideIn 0.5s ease-out;
+}
+
+@keyframes authSlideIn {
+  from {
+    opacity: 0;
+    transform: translateY(20px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+[data-theme="dark"] .auth-container {
+  box-shadow: 0 4px 24px rgba(0,0,0,0.3);
 }
 
 .auth-container h1 {
@@ -101,6 +153,18 @@ body {
   font-size: 14px;
   outline: none;
   transition: border-color 0.2s;
+  background: var(--bg);
+  color: var(--text);
+}
+
+[data-theme="dark"] .auth-form input {
+  background: #0f172a;
+  border-color: #334155;
+  color: #e2e8f0;
+}
+
+[data-theme="dark"] .auth-form input::placeholder {
+  color: #64748b;
 }
 
 .auth-form input:focus {
@@ -130,6 +194,11 @@ body {
   padding: 8px 12px;
   background: #fef2f2;
   border-radius: 8px;
+}
+
+[data-theme="dark"] .error {
+  background: #3b1111;
+  color: #fca5a5;
 }
 
 /* ---- CHAT LAYOUT ---- */
@@ -193,9 +262,28 @@ body {
   color: var(--primary);
 }
 
+[data-theme="dark"] #admin-btn:hover {
+  background: #2d2d5e;
+}
+
 #logout-btn:hover {
   background: #fef2f2;
   color: var(--danger);
+}
+
+[data-theme="dark"] #logout-btn:hover {
+  background: #3b1111;
+}
+
+/* Theme toggle button */
+#theme-toggle:hover {
+  background: #f0f0ff;
+  color: var(--primary);
+}
+
+[data-theme="dark"] #theme-toggle:hover {
+  background: #2d2d5e;
+  color: var(--primary-light);
 }
 
 .search-box {
@@ -211,6 +299,7 @@ body {
   outline: none;
   background: var(--bg);
   transition: border-color 0.2s;
+  color: var(--text);
 }
 
 .search-box input:focus {
@@ -221,6 +310,10 @@ body {
 .blocked-users-section {
   border-bottom: 1px solid var(--border);
   background: #fef2f2;
+}
+
+[data-theme="dark"] .blocked-users-section {
+  background: #3b1111;
 }
 
 .blocked-users-header {
@@ -250,6 +343,10 @@ body {
   margin-bottom: 6px;
 }
 
+[data-theme="dark"] .blocked-user-item {
+  background: #1e293b;
+}
+
 .blocked-user-name {
   font-size: 13px;
   font-weight: 500;
@@ -269,6 +366,10 @@ body {
 
 .unblock-btn:hover {
   background: #f0fdf4;
+}
+
+[data-theme="dark"] .unblock-btn:hover {
+  background: #0d3320;
 }
 
 .user-list {
@@ -293,6 +394,10 @@ body {
 
 .user-item.active {
   background: #ededf7;
+}
+
+[data-theme="dark"] .user-item.active {
+  background: #2d2d5e;
 }
 
 .user-item-info {
@@ -351,6 +456,11 @@ body {
   color: #7c3aed;
 }
 
+[data-theme="dark"] .admin-badge {
+  background: #3b2d6e;
+  color: #c4b5fd;
+}
+
 .user-badge {
   background: var(--bg);
   color: var(--text-light);
@@ -359,6 +469,11 @@ body {
 .bot-badge {
   background: #dbeafe;
   color: #2563eb;
+}
+
+[data-theme="dark"] .bot-badge {
+  background: #1e3a5f;
+  color: #93c5fd;
 }
 
 /* Status badge */
@@ -375,9 +490,17 @@ body {
   color: var(--online);
 }
 
+[data-theme="dark"] .active-badge {
+  background: #0d3320;
+}
+
 .banned-badge {
   background: #fef2f2;
   color: var(--danger);
+}
+
+[data-theme="dark"] .banned-badge {
+  background: #3b1111;
 }
 
 /* User Avatar */
@@ -393,6 +516,7 @@ body {
   font-size: 16px;
   color: white;
   position: relative;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.12);
 }
 
 .user-avatar.online::after {
@@ -489,6 +613,10 @@ body {
   background: #fef2f2;
 }
 
+[data-theme="dark"] #block-btn:hover {
+  background: #3b1111;
+}
+
 #block-btn.blocked {
   border-color: var(--danger);
   color: white;
@@ -544,6 +672,11 @@ body {
   box-shadow: 0 1px 2px rgba(0,0,0,0.06);
 }
 
+[data-theme="dark"] .message.received {
+  color: #e2e8f0;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.2);
+}
+
 .message .time {
   font-size: 11px;
   opacity: 0.7;
@@ -595,6 +728,7 @@ body {
   outline: none;
   background: var(--bg);
   transition: border-color 0.2s;
+  color: var(--text);
 }
 
 .message-form input:focus {
@@ -619,6 +753,21 @@ body {
   background: var(--primary-dark);
 }
 
+/* ---- DARK MODE INPUT FIELDS ---- */
+[data-theme="dark"] input {
+  background: #0f172a;
+  color: #e2e8f0;
+  border-color: #334155;
+}
+
+[data-theme="dark"] input::placeholder {
+  color: #64748b;
+}
+
+[data-theme="dark"] input:focus {
+  border-color: var(--primary);
+}
+
 /* Scrollbar */
 ::-webkit-scrollbar {
   width: 6px;
@@ -631,6 +780,10 @@ body {
 ::-webkit-scrollbar-thumb {
   background: #c5c9cf;
   border-radius: 3px;
+}
+
+[data-theme="dark"] ::-webkit-scrollbar-thumb {
+  background: #475569;
 }
 
 /* Message status */
@@ -682,6 +835,10 @@ body {
   animation: fadeIn 0.2s ease;
 }
 
+[data-theme="dark"] .admin-panel {
+  background: #1a1a2e;
+}
+
 .admin-panel-header {
   display: flex;
   align-items: center;
@@ -692,6 +849,10 @@ body {
   top: 0;
   background: var(--white);
   z-index: 10;
+}
+
+[data-theme="dark"] .admin-panel-header {
+  background: #1a1a2e;
 }
 
 .admin-panel-header h2 {
@@ -714,6 +875,10 @@ body {
   padding: 20px;
   box-shadow: 0 1px 8px rgba(0,0,0,0.06);
   border-left: 4px solid var(--primary);
+}
+
+[data-theme="dark"] .stat-card {
+  box-shadow: 0 1px 8px rgba(0,0,0,0.2);
 }
 
 .stat-card:nth-child(2) { border-left-color: var(--danger); }
@@ -775,6 +940,10 @@ body {
 .admin-table tbody tr:hover { background: #f8f9fb; }
 .admin-table tbody tr:last-child td { border-bottom: none; }
 
+[data-theme="dark"] .admin-table tbody tr:hover {
+  background: #1e293b;
+}
+
 /* Admin action buttons */
 .admin-actions {
   display: flex;
@@ -800,6 +969,8 @@ body {
 
 .ban-btn:hover { background: #fef2f2; }
 
+[data-theme="dark"] .ban-btn:hover { background: #3b1111; }
+
 .unban-btn {
   background: transparent;
   border: 1.5px solid var(--online);
@@ -807,6 +978,8 @@ body {
 }
 
 .unban-btn:hover { background: #f0fdf4; }
+
+[data-theme="dark"] .unban-btn:hover { background: #0d3320; }
 
 .delete-btn {
   background: var(--danger);
@@ -826,6 +999,8 @@ body {
 }
 
 .role-btn:hover { background: #f0f0ff; }
+
+[data-theme="dark"] .role-btn:hover { background: #2d2d5e; }
 
 .admin-self-label {
   font-size: 12px;
@@ -863,6 +1038,11 @@ body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+[data-theme="dark"] .emoji-picker {
+  background: #16213e;
+  box-shadow: 0 4px 24px rgba(0,0,0,0.4);
 }
 
 .emoji-picker-tabs {
@@ -1007,6 +1187,10 @@ body {
   z-index: 51;
 }
 
+[data-theme="dark"] .emoji-suggest {
+  box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+}
+
 .emoji-suggest-item {
   width: 36px;
   height: 36px;
@@ -1085,6 +1269,10 @@ body {
   animation: fadeIn 0.15s ease;
 }
 
+[data-theme="dark"] .reaction-popup {
+  box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+}
+
 .message-wrapper.sent .reaction-popup {
   right: 0;
 }
@@ -1136,9 +1324,17 @@ body {
   background: #e8ecf1;
 }
 
+[data-theme="dark"] .reaction-badge:hover {
+  background: #334155;
+}
+
 .reaction-badge.reacted-by-me {
   background: #ede9fe;
   border-color: var(--primary-light);
+}
+
+[data-theme="dark"] .reaction-badge.reacted-by-me {
+  background: #3b2d6e;
 }
 
 .reaction-badge .reaction-count {

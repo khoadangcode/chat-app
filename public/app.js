@@ -15,6 +15,33 @@ let userRoles = {}; // userId -> role
 const pendingMessages = new Map();
 let nextTempId = -1;
 
+// ---- DARK MODE ----
+function initTheme() {
+  const saved = localStorage.getItem('theme') || 'light';
+  document.documentElement.setAttribute('data-theme', saved);
+  updateThemeIcon(saved);
+}
+
+function toggleTheme() {
+  const current = document.documentElement.getAttribute('data-theme');
+  const next = current === 'dark' ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', next);
+  localStorage.setItem('theme', next);
+  updateThemeIcon(next);
+}
+
+function updateThemeIcon(theme) {
+  const sun = $('#theme-icon-sun');
+  const moon = $('#theme-icon-moon');
+  if (sun && moon) {
+    sun.classList.toggle('hidden', theme === 'dark');
+    moon.classList.toggle('hidden', theme !== 'dark');
+  }
+}
+
+initTheme();
+$('#theme-toggle')?.addEventListener('click', toggleTheme);
+
 const COLORS = ['#5b5ea6','#e07a5f','#3d85c6','#81b29a','#f2a65a','#e76f51','#457b9d','#8338ec'];
 
 // ---- NOTIFICATION SOUND ----
@@ -214,6 +241,7 @@ $('#register-form').addEventListener('submit', async (e) => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         username: $('#reg-username').value.trim(),
+        displayName: $('#reg-displayname').value.trim(),
         password: $('#reg-password').value
       })
     });
@@ -247,8 +275,9 @@ function enterChat(user) {
   $('#auth-screen').classList.add('hidden');
   $('#chat-screen').classList.remove('hidden');
 
-  $('#my-username').textContent = user.username;
-  setStaticAvatar($('#my-avatar'), user.username, true);
+  const myName = user.display_name || user.username;
+  $('#my-username').textContent = myName;
+  setStaticAvatar($('#my-avatar'), myName, true);
 
   const adminBtn = $('#admin-btn');
   if (user.role === 'admin') {
@@ -459,8 +488,9 @@ function renderUserList(users) {
     if (user.role === 'admin') roleBadgeHtml = '<span class="role-badge admin-badge">Admin</span>';
     else if (user.role === 'bot') roleBadgeHtml = '<span class="role-badge bot-badge">AI</span>';
     const isBot = user.role === 'bot';
+    const displayName = user.nickname || user.display_name || user.username;
     info.innerHTML = `
-      <div class="user-item-name">${isBot ? '🤖 ' : ''}${escapeHtml(user.username)} ${roleBadgeHtml}</div>
+      <div class="user-item-name">${isBot ? '🤖 ' : ''}${escapeHtml(displayName)} ${roleBadgeHtml}</div>
       <div class="user-item-preview" data-preview-for="${user.id}"></div>
     `;
 
@@ -475,7 +505,7 @@ function renderUserList(users) {
       item.appendChild(badge);
     }
 
-    item.addEventListener('click', () => selectUser(user.id, user.username));
+    item.addEventListener('click', () => selectUser(user.id, displayName));
     list.appendChild(item);
   });
 

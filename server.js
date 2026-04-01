@@ -61,6 +61,17 @@ async function initDB() {
     CREATE INDEX IF NOT EXISTS idx_reactions_message ON reactions(message_id);
   `);
 
+  // Add display_name column and nicknames table
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS display_name TEXT`);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS nicknames (
+      user_id INTEGER NOT NULL REFERENCES users(id),
+      target_id INTEGER NOT NULL REFERENCES users(id),
+      nickname TEXT NOT NULL,
+      PRIMARY KEY (user_id, target_id)
+    )
+  `);
+
   // Promote first user to admin if none exists
   const { rows: admins } = await pool.query("SELECT id FROM users WHERE role = 'admin' LIMIT 1");
   if (admins.length === 0) {
@@ -74,10 +85,12 @@ async function initDB() {
   const { rows: bots } = await pool.query("SELECT id FROM users WHERE username = $1", [BOT_USERNAME]);
   if (bots.length > 0) {
     BOT_ID = bots[0].id;
+    // Ensure bot has display_name set
+    await pool.query("UPDATE users SET display_name = 'AI Bot' WHERE id = $1 AND display_name IS NULL", [BOT_ID]);
   } else {
     const hash = bcrypt.hashSync(crypto.randomBytes(32).toString('hex'), 10);
     const { rows } = await pool.query(
-      "INSERT INTO users (username, password, role) VALUES ($1, $2, 'bot') RETURNING id",
+      "INSERT INTO users (username, password, role, display_name) VALUES ($1, $2, 'bot', 'AI Bot') RETURNING id",
       [BOT_USERNAME, hash]
     );
     BOT_ID = rows[0].id;
@@ -183,7 +196,7 @@ async function requireAdmin(req, res, next) {
 // --- AUTH ROUTES ---
 
 app.post('/api/register', async (req, res) => {
-  const { username, password } = req.body;
+  const { username, password, displayName } = req.body;
   if (!username || !password) return res.status(400).json({ error: 'Vui lòng nhập đầy đủ thông tin' });
   if (username.length < 3 || password.length < 4) return res.status(400).json({ error: 'Username >= 3 ký tự, password >= 4 ký tự' });
 
@@ -195,14 +208,14 @@ app.post('/api/register', async (req, res) => {
   const role = parseInt(countRows[0].c) === 0 ? 'admin' : 'user';
 
   const { rows } = await pool.query(
-    'INSERT INTO users (username, password, role) VALUES ($1, $2, $3) RETURNING id',
-    [username, hash, role]
+    'INSERT INTO users (username, password, role, display_name) VALUES ($1, $2, $3, $4) RETURNING id, display_name',
+    [username, hash, role, displayName || null]
   );
 
   req.session.userId = rows[0].id;
   req.session.username = username;
   const token = createAuthToken(rows[0].id, username);
-  res.json({ id: rows[0].id, username, role, token });
+  res.json({ id: rows[0].id, username, role, display_name: rows[0].display_name, token });
 });
 
 app.post('/api/login', async (req, res) => {
@@ -217,7 +230,7 @@ app.post('/api/login', async (req, res) => {
   req.session.userId = user.id;
   req.session.username = user.username;
   const token = createAuthToken(user.id, user.username);
-  res.json({ id: user.id, username: user.username, role: user.role, token });
+  res.json({ id: user.id, username: user.username, role: user.role, display_name: user.display_name, token });
 });
 
 app.post('/api/logout', (req, res) => {
@@ -234,32 +247,36 @@ app.get('/api/me', async (req, res) => {
   else if (req.session.userId) userId = req.session.userId;
   if (!userId) return res.status(401).json({ error: 'Chưa đăng nhập' });
 
-  const { rows } = await pool.query('SELECT id, username, role, is_banned FROM users WHERE id = $1', [userId]);
+  const { rows } = await pool.query('SELECT id, username, role, is_banned, display_name FROM users WHERE id = $1', [userId]);
   const user = rows[0];
   if (!user || user.is_banned) {
     if (req.session) req.session.destroy();
     return res.status(401).json({ error: 'Tài khoản đã bị khóa' });
   }
   const token = createAuthToken(user.id, user.username);
-  res.json({ id: user.id, username: user.username, role: user.role, token });
+  res.json({ id: user.id, username: user.username, role: user.role, display_name: user.display_name, token });
 });
 
 // --- USER & MESSAGE ROUTES ---
 
 app.get('/api/users', requireAuth, async (req, res) => {
   const { rows: users } = await pool.query(`
-    SELECT u.id, u.username, u.role FROM users u
+    SELECT u.id, u.username, u.display_name, u.role,
+      n.nickname
+    FROM users u
+    LEFT JOIN nicknames n ON n.target_id = u.id AND n.user_id = $1
     WHERE u.id != $1 AND u.is_banned = 0 AND u.role != 'bot'
       AND u.id NOT IN (SELECT blocked_id FROM blocked_users WHERE user_id = $1)
   `, [req.userId]);
-  users.unshift({ id: BOT_ID, username: BOT_USERNAME, role: 'bot' });
+  users.unshift({ id: BOT_ID, username: BOT_USERNAME, display_name: 'AI Bot', role: 'bot', nickname: null });
   res.json(users);
 });
 
 app.get('/api/messages/:userId', requireAuth, async (req, res) => {
   const otherId = parseInt(req.params.userId);
   const { rows: messages } = await pool.query(`
-    SELECT m.*, u1.username as sender_name, u2.username as receiver_name
+    SELECT m.*, u1.username as sender_name, u1.display_name as sender_display_name,
+      u2.username as receiver_name
     FROM messages m
     JOIN users u1 ON m.sender_id = u1.id
     JOIN users u2 ON m.receiver_id = u2.id
@@ -312,6 +329,33 @@ app.delete('/api/block/:userId', requireAuth, async (req, res) => {
   res.json({ ok: true });
 });
 
+// --- NICKNAME ROUTES ---
+
+app.get('/api/nicknames', requireAuth, async (req, res) => {
+  const { rows } = await pool.query(
+    'SELECT target_id, nickname FROM nicknames WHERE user_id = $1',
+    [req.userId]
+  );
+  res.json(rows);
+});
+
+app.post('/api/nickname/:userId', requireAuth, async (req, res) => {
+  const targetId = parseInt(req.params.userId);
+  const { nickname } = req.body;
+  if (!nickname || !nickname.trim()) return res.status(400).json({ error: 'Nickname không được để trống' });
+  await pool.query(
+    'INSERT INTO nicknames (user_id, target_id, nickname) VALUES ($1, $2, $3) ON CONFLICT (user_id, target_id) DO UPDATE SET nickname = $3',
+    [req.userId, targetId, nickname.trim()]
+  );
+  res.json({ ok: true });
+});
+
+app.delete('/api/nickname/:userId', requireAuth, async (req, res) => {
+  const targetId = parseInt(req.params.userId);
+  await pool.query('DELETE FROM nicknames WHERE user_id = $1 AND target_id = $2', [req.userId, targetId]);
+  res.json({ ok: true });
+});
+
 // --- ADMIN ROUTES ---
 
 app.get('/api/admin/stats', requireAdmin, async (req, res) => {
@@ -331,7 +375,7 @@ app.get('/api/admin/stats', requireAdmin, async (req, res) => {
 
 app.get('/api/admin/users', requireAdmin, async (req, res) => {
   const { rows } = await pool.query(`
-    SELECT u.id, u.username, u.role, u.is_banned, u.created_at,
+    SELECT u.id, u.username, u.display_name, u.role, u.is_banned, u.created_at,
       (SELECT COUNT(*) FROM messages WHERE sender_id = u.id) as message_count
     FROM users u ORDER BY u.created_at DESC
   `);
@@ -365,6 +409,7 @@ app.delete('/api/admin/users/:userId', requireAdmin, async (req, res) => {
   await pool.query('DELETE FROM reactions WHERE message_id IN (SELECT id FROM messages WHERE sender_id = $1 OR receiver_id = $1)', [targetId]);
   await pool.query('DELETE FROM messages WHERE sender_id = $1 OR receiver_id = $1', [targetId]);
   await pool.query('DELETE FROM blocked_users WHERE user_id = $1 OR blocked_id = $1', [targetId]);
+  await pool.query('DELETE FROM nicknames WHERE user_id = $1 OR target_id = $1', [targetId]);
   await pool.query('DELETE FROM users WHERE id = $1', [targetId]);
 
   const sockets = onlineUsers.get(targetId);
@@ -421,11 +466,16 @@ io.on('connection', async (socket) => {
       [userId, receiverId, sanitized]
     );
 
+    // Fetch sender's display_name
+    const { rows: senderRows } = await pool.query('SELECT display_name FROM users WHERE id = $1', [userId]);
+    const senderDisplayName = senderRows[0]?.display_name || null;
+
     const message = {
       id: inserted[0].id,
       sender_id: userId,
       receiver_id: receiverId,
       sender_name: username,
+      sender_display_name: senderDisplayName,
       content: sanitized,
       created_at: new Date().toISOString()
     };
@@ -444,6 +494,7 @@ io.on('connection', async (socket) => {
           sender_id: BOT_ID,
           receiver_id: userId,
           sender_name: BOT_USERNAME,
+          sender_display_name: 'AI Bot',
           content: reply,
           created_at: new Date().toISOString()
         };
