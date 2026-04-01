@@ -250,18 +250,34 @@ async function getBotReply(userMessage, imageData, userId) {
 
     return reply;
   } catch (err) {
-    console.error('Gemini error:', err.message);
+    console.error('Gemini error:', err.message, err.stack);
     // Reset history and try one more time without context
     conv.messages = [];
     try {
-      const result = await geminiModel.generateContent(parts.map(p => p.inlineData ? p : { text: currentText }));
-      return result.response.text().slice(0, 4000);
+      const result = await geminiModel.generateContent(currentText);
+      const reply = result.response.text().slice(0, 4000);
+      conv.messages.push({ role: 'user', text: currentText });
+      conv.messages.push({ role: 'bot', text: reply });
+      return reply;
     } catch (err2) {
-      console.error('Gemini fallback error:', err2.message);
-      return 'Ối, mình bị lỗi rồi 😵 Thử lại sau nhé!';
+      console.error('Gemini fallback error:', err2.message, err2.stack);
+      // Show actual error to help debug
+      return '⚠️ Lỗi Gemini: ' + (err2.message || 'Unknown').slice(0, 300) + '\n\nLỗi gốc: ' + (err.message || 'Unknown').slice(0, 300);
     }
   }
 }
+
+// --- DEBUG: Test Gemini API ---
+app.get('/api/bot-test', async (req, res) => {
+  if (!geminiModel) return res.json({ ok: false, error: 'GEMINI_API_KEY not set' });
+  try {
+    const result = await geminiModel.generateContent('Nói "xin chào" bằng tiếng Việt, 1 câu ngắn.');
+    const text = result.response.text();
+    res.json({ ok: true, reply: text.slice(0, 200) });
+  } catch (err) {
+    res.json({ ok: false, error: err.message, code: err.code, status: err.status });
+  }
+});
 
 // --- SESSION & MIDDLEWARE ---
 const sessionMiddleware = session({
