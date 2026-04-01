@@ -100,7 +100,7 @@ const BOT_SYSTEM_PROMPT = `Bạn là "AI Bot", một chatbot thân thiện trong
 if (process.env.GEMINI_API_KEY) {
   const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
   geminiModel = genAI.getGenerativeModel({
-    model: 'gemini-1.5-flash',
+    model: 'gemini-2.5-flash',
     systemInstruction: BOT_SYSTEM_PROMPT
   });
   console.log('Gemini AI Bot enabled');
