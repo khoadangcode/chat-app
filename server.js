@@ -168,21 +168,75 @@ if (process.env.GEMINI_API_KEY) {
   console.log('Gemini AI Bot enabled');
 }
 
-async function getBotReply(userMessage, imageData) {
+// --- BOT CONVERSATION HISTORY ---
+const botConversations = new Map(); // userId -> { history: [{role, parts}], lastActivity: timestamp }
+const BOT_MAX_HISTORY = 20;
+const BOT_HISTORY_TIMEOUT = 30 * 60 * 1000; // 30 minutes
+
+// Clean up stale conversations every 10 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [uid, conv] of botConversations) {
+    if (now - conv.lastActivity > BOT_HISTORY_TIMEOUT) {
+      botConversations.delete(uid);
+    }
+  }
+}, 10 * 60 * 1000);
+
+function stripImagesFromHistory(history) {
+  return history.map(entry => ({
+    role: entry.role,
+    parts: entry.parts.map(part => {
+      if (part.inlineData) {
+        return { text: '[Hình ảnh đã gửi trước đó]' };
+      }
+      return part;
+    })
+  }));
+}
+
+async function getBotReply(userMessage, imageData, userId) {
   if (!geminiModel) return 'Xin lỗi, AI Bot chưa được kích hoạt 🔑';
   try {
-    let result;
-    if (imageData) {
-      // Multimodal: send text prompt + image to Gemini
-      const prompt = userMessage || 'Hãy mô tả hình ảnh này.';
-      result = await geminiModel.generateContent([
-        { text: prompt },
-        { inlineData: { mimeType: imageData.mimeType, data: imageData.base64 } }
-      ]);
-    } else {
-      result = await geminiModel.generateContent(userMessage);
+    // Get or create conversation for this user
+    if (!botConversations.has(userId)) {
+      botConversations.set(userId, { history: [], lastActivity: Date.now() });
     }
-    return result.response.text().slice(0, 2000);
+    const conv = botConversations.get(userId);
+
+    // Check timeout - reset if stale
+    if (Date.now() - conv.lastActivity > BOT_HISTORY_TIMEOUT) {
+      conv.history = [];
+    }
+    conv.lastActivity = Date.now();
+
+    // Build current message parts
+    const currentParts = [];
+    if (imageData) {
+      currentParts.push({ text: userMessage || 'Hãy mô tả hình ảnh này.' });
+      currentParts.push({ inlineData: { mimeType: imageData.mimeType, data: imageData.base64 } });
+    } else {
+      currentParts.push({ text: userMessage });
+    }
+
+    // Strip images from old history to save memory, keep text descriptions
+    const sanitizedHistory = stripImagesFromHistory(conv.history);
+
+    // Use Gemini chat API with history
+    const chat = geminiModel.startChat({ history: sanitizedHistory });
+    const result = await chat.sendMessage(currentParts);
+    const reply = result.response.text().slice(0, 2000);
+
+    // Store current user message and bot response in history
+    conv.history.push({ role: 'user', parts: currentParts });
+    conv.history.push({ role: 'model', parts: [{ text: reply }] });
+
+    // Trim history to max entries (keep most recent)
+    while (conv.history.length > BOT_MAX_HISTORY) {
+      conv.history.shift();
+    }
+
+    return reply;
   } catch (err) {
     console.error('Gemini error:', err.message);
     return 'Ối, mình bị lỗi rồi 😵 Thử lại sau nhé!';
@@ -825,7 +879,7 @@ io.on('connection', async (socket) => {
           botPrompt = 'Hãy mô tả và phân tích hình ảnh này.';
         }
       }
-      getBotReply(botPrompt, botImageData).then(async (reply) => {
+      getBotReply(botPrompt, botImageData, userId).then(async (reply) => {
         const { rows: botInserted } = await pool.query(
           'INSERT INTO messages (sender_id, receiver_id, content) VALUES ($1, $2, $3) RETURNING id',
           [BOT_ID, userId, reply]
