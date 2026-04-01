@@ -94,30 +94,32 @@ if (botUser) {
 
 // Gemini AI
 let geminiModel = null;
-if (process.env.GEMINI_API_KEY) {
-  const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-  geminiModel = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
-}
-
 const BOT_SYSTEM_PROMPT = `Bạn là "AI Bot", một chatbot thân thiện trong app nhắn tin. Quy tắc:
 - Trả lời bằng tiếng Việt, ngắn gọn (1-3 câu)
 - Vui vẻ, dùng emoji phù hợp
 - Nếu không biết thì nói thẳng
 - Không bao giờ giả vờ là người thật`;
 
+if (process.env.GEMINI_API_KEY) {
+  const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+  geminiModel = genAI.getGenerativeModel({
+    model: 'gemini-1.5-flash',
+    systemInstruction: BOT_SYSTEM_PROMPT
+  });
+  console.log('Gemini AI Bot enabled');
+} else {
+  console.log('GEMINI_API_KEY not set - AI Bot will use fallback replies');
+}
+
 async function getBotReply(userMessage) {
   if (!geminiModel) {
     return 'Xin lỗi, AI Bot chưa được kích hoạt. Admin cần cấu hình API key! 🔑';
   }
   try {
-    const chat = geminiModel.startChat({
-      history: [],
-      systemInstruction: BOT_SYSTEM_PROMPT
-    });
-    const result = await chat.sendMessage(userMessage);
+    const result = await geminiModel.generateContent(userMessage);
     return result.response.text().slice(0, 2000);
   } catch (err) {
-    console.error('Gemini error:', err.message);
+    console.error('Gemini error:', err.message, err.stack);
     return 'Ối, mình bị lỗi rồi 😵 Thử lại sau nhé!';
   }
 }
