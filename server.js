@@ -4,7 +4,7 @@ const { Server } = require('socket.io');
 const session = require('express-session');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
-const Database = require('better-sqlite3');
+const { Pool } = require('pg');
 const path = require('path');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 
@@ -16,83 +16,80 @@ const io = new Server(server, {
   transports: ['websocket', 'polling']
 });
 
-// Database setup
-const db = new Database(path.join(__dirname, 'chat.db'));
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
+// --- DATABASE (PostgreSQL / Neon) ---
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
+});
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT UNIQUE NOT NULL,
-    password TEXT NOT NULL,
-    role TEXT DEFAULT 'user',
-    is_banned INTEGER DEFAULT 0,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
+async function initDB() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id SERIAL PRIMARY KEY,
+      username TEXT UNIQUE NOT NULL,
+      password TEXT NOT NULL,
+      role TEXT DEFAULT 'user',
+      is_banned INTEGER DEFAULT 0,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
 
-  CREATE TABLE IF NOT EXISTS messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    sender_id INTEGER NOT NULL,
-    receiver_id INTEGER NOT NULL,
-    content TEXT NOT NULL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (sender_id) REFERENCES users(id),
-    FOREIGN KEY (receiver_id) REFERENCES users(id)
-  );
+    CREATE TABLE IF NOT EXISTS messages (
+      id SERIAL PRIMARY KEY,
+      sender_id INTEGER NOT NULL REFERENCES users(id),
+      receiver_id INTEGER NOT NULL REFERENCES users(id),
+      content TEXT NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
 
-  CREATE TABLE IF NOT EXISTS blocked_users (
-    user_id INTEGER NOT NULL,
-    blocked_id INTEGER NOT NULL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (user_id, blocked_id),
-    FOREIGN KEY (user_id) REFERENCES users(id),
-    FOREIGN KEY (blocked_id) REFERENCES users(id)
-  );
+    CREATE TABLE IF NOT EXISTS blocked_users (
+      user_id INTEGER NOT NULL REFERENCES users(id),
+      blocked_id INTEGER NOT NULL REFERENCES users(id),
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (user_id, blocked_id)
+    );
 
-  CREATE TABLE IF NOT EXISTS reactions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    message_id INTEGER NOT NULL,
-    user_id INTEGER NOT NULL,
-    emoji TEXT NOT NULL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(message_id, user_id),
-    FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE,
-    FOREIGN KEY (user_id) REFERENCES users(id)
-  );
+    CREATE TABLE IF NOT EXISTS reactions (
+      id SERIAL PRIMARY KEY,
+      message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+      user_id INTEGER NOT NULL REFERENCES users(id),
+      emoji TEXT NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      UNIQUE(message_id, user_id)
+    );
 
-  CREATE INDEX IF NOT EXISTS idx_messages_users ON messages(sender_id, receiver_id);
-  CREATE INDEX IF NOT EXISTS idx_reactions_message ON reactions(message_id);
-`);
+    CREATE INDEX IF NOT EXISTS idx_messages_users ON messages(sender_id, receiver_id);
+    CREATE INDEX IF NOT EXISTS idx_reactions_message ON reactions(message_id);
+  `);
 
-// Migration for existing DB: add columns if missing
-try { db.exec("ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'user'"); } catch {}
-try { db.exec('ALTER TABLE users ADD COLUMN is_banned INTEGER DEFAULT 0'); } catch {}
-
-// Promote first user to admin if no admin exists
-const adminExists = db.prepare("SELECT id FROM users WHERE role = 'admin'").get();
-if (!adminExists) {
-  const firstUser = db.prepare('SELECT id FROM users ORDER BY id ASC LIMIT 1').get();
-  if (firstUser) {
-    db.prepare("UPDATE users SET role = 'admin' WHERE id = ?").run(firstUser.id);
+  // Promote first user to admin if none exists
+  const { rows: admins } = await pool.query("SELECT id FROM users WHERE role = 'admin' LIMIT 1");
+  if (admins.length === 0) {
+    const { rows: first } = await pool.query('SELECT id FROM users ORDER BY id ASC LIMIT 1');
+    if (first.length > 0) {
+      await pool.query("UPDATE users SET role = 'admin' WHERE id = $1", [first[0].id]);
+    }
   }
+
+  // Create bot user if not exists
+  const { rows: bots } = await pool.query("SELECT id FROM users WHERE username = $1", [BOT_USERNAME]);
+  if (bots.length > 0) {
+    BOT_ID = bots[0].id;
+  } else {
+    const hash = bcrypt.hashSync(crypto.randomBytes(32).toString('hex'), 10);
+    const { rows } = await pool.query(
+      "INSERT INTO users (username, password, role) VALUES ($1, $2, 'bot') RETURNING id",
+      [BOT_USERNAME, hash]
+    );
+    BOT_ID = rows[0].id;
+  }
+
+  console.log('Database initialized, BOT_ID =', BOT_ID);
 }
 
 // --- AI BOT SETUP ---
 const BOT_USERNAME = 'AI Bot';
 let BOT_ID;
 
-// Create bot user if not exists
-const botUser = db.prepare("SELECT id FROM users WHERE username = ?").get(BOT_USERNAME);
-if (botUser) {
-  BOT_ID = botUser.id;
-} else {
-  const hash = bcrypt.hashSync(crypto.randomBytes(32).toString('hex'), 10);
-  const result = db.prepare("INSERT INTO users (username, password, role) VALUES (?, ?, 'bot')").run(BOT_USERNAME, hash);
-  BOT_ID = result.lastInsertRowid;
-}
-
-// Gemini AI
 let geminiModel = null;
 const BOT_SYSTEM_PROMPT = `Bạn là "AI Bot", một chatbot thân thiện trong app nhắn tin. Quy tắc:
 - Trả lời bằng tiếng Việt, ngắn gọn (1-3 câu)
@@ -107,24 +104,20 @@ if (process.env.GEMINI_API_KEY) {
     systemInstruction: BOT_SYSTEM_PROMPT
   });
   console.log('Gemini AI Bot enabled');
-} else {
-  console.log('GEMINI_API_KEY not set - AI Bot will use fallback replies');
 }
 
 async function getBotReply(userMessage) {
-  if (!geminiModel) {
-    return 'Xin lỗi, AI Bot chưa được kích hoạt. Admin cần cấu hình API key! 🔑';
-  }
+  if (!geminiModel) return 'Xin lỗi, AI Bot chưa được kích hoạt 🔑';
   try {
     const result = await geminiModel.generateContent(userMessage);
     return result.response.text().slice(0, 2000);
   } catch (err) {
-    console.error('Gemini error:', err.message, err.stack);
+    console.error('Gemini error:', err.message);
     return 'Ối, mình bị lỗi rồi 😵 Thử lại sau nhé!';
   }
 }
 
-// Session middleware
+// --- SESSION & MIDDLEWARE ---
 const sessionMiddleware = session({
   secret: process.env.SESSION_SECRET || 'chat-app-secret-key-change-in-production',
   resave: false,
@@ -137,18 +130,17 @@ app.use(sessionMiddleware);
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Auth tokens for socket.io (bypass cookie issues with tunnels)
-const authTokens = new Map(); // token -> { userId, username }
+// Auth tokens
+const authTokens = new Map();
 
 function createAuthToken(userId, username) {
   const token = crypto.randomBytes(32).toString('hex');
   authTokens.set(token, { userId, username });
-  // Clean up token after 24h
   setTimeout(() => authTokens.delete(token), 24 * 60 * 60 * 1000);
   return token;
 }
 
-// Socket.io auth via token
+// Socket.io auth
 io.use((socket, next) => {
   const token = socket.handshake.auth?.token;
   if (token && authTokens.has(token)) {
@@ -161,8 +153,6 @@ io.use((socket, next) => {
   }
 });
 
-// --- MIDDLEWARE ---
-
 function resolveTokenUser(req) {
   const h = req.headers.authorization;
   if (h && h.startsWith('Bearer ')) {
@@ -174,84 +164,58 @@ function resolveTokenUser(req) {
 
 function requireAuth(req, res, next) {
   const tokenUser = resolveTokenUser(req);
-  if (tokenUser) {
-    req.userId = tokenUser.userId;
-    req.username = tokenUser.username;
-    return next();
-  }
-  if (req.session.userId) {
-    req.userId = req.session.userId;
-    req.username = req.session.username;
-    return next();
-  }
+  if (tokenUser) { req.userId = tokenUser.userId; req.username = tokenUser.username; return next(); }
+  if (req.session.userId) { req.userId = req.session.userId; req.username = req.session.username; return next(); }
   return res.status(401).json({ error: 'Chưa đăng nhập' });
 }
 
-function requireAdmin(req, res, next) {
+async function requireAdmin(req, res, next) {
   const tokenUser = resolveTokenUser(req);
-  if (tokenUser) {
-    req.userId = tokenUser.userId;
-    req.username = tokenUser.username;
-  } else if (req.session.userId) {
-    req.userId = req.session.userId;
-    req.username = req.session.username;
-  } else {
-    return res.status(401).json({ error: 'Chưa đăng nhập' });
-  }
-  const user = db.prepare('SELECT role FROM users WHERE id = ?').get(req.userId);
-  if (!user || user.role !== 'admin') {
-    return res.status(403).json({ error: 'Không có quyền admin' });
-  }
+  if (tokenUser) { req.userId = tokenUser.userId; req.username = tokenUser.username; }
+  else if (req.session.userId) { req.userId = req.session.userId; req.username = req.session.username; }
+  else return res.status(401).json({ error: 'Chưa đăng nhập' });
+
+  const { rows } = await pool.query('SELECT role FROM users WHERE id = $1', [req.userId]);
+  if (!rows[0] || rows[0].role !== 'admin') return res.status(403).json({ error: 'Không có quyền admin' });
   next();
 }
 
 // --- AUTH ROUTES ---
 
-app.post('/api/register', (req, res) => {
+app.post('/api/register', async (req, res) => {
   const { username, password } = req.body;
-  if (!username || !password) {
-    return res.status(400).json({ error: 'Vui lòng nhập đầy đủ thông tin' });
-  }
-  if (username.length < 3 || password.length < 4) {
-    return res.status(400).json({ error: 'Username >= 3 ký tự, password >= 4 ký tự' });
-  }
+  if (!username || !password) return res.status(400).json({ error: 'Vui lòng nhập đầy đủ thông tin' });
+  if (username.length < 3 || password.length < 4) return res.status(400).json({ error: 'Username >= 3 ký tự, password >= 4 ký tự' });
 
-  const existing = db.prepare('SELECT id FROM users WHERE username = ?').get(username);
-  if (existing) {
-    return res.status(400).json({ error: 'Username đã tồn tại' });
-  }
+  const { rows: existing } = await pool.query('SELECT id FROM users WHERE username = $1', [username]);
+  if (existing.length > 0) return res.status(400).json({ error: 'Username đã tồn tại' });
 
   const hash = bcrypt.hashSync(password, 10);
-  const userCount = db.prepare('SELECT COUNT(*) as count FROM users').get().count;
-  const role = userCount === 0 ? 'admin' : 'user';
+  const { rows: countRows } = await pool.query("SELECT COUNT(*) as c FROM users WHERE role != 'bot'");
+  const role = parseInt(countRows[0].c) === 0 ? 'admin' : 'user';
 
-  const result = db.prepare('INSERT INTO users (username, password, role) VALUES (?, ?, ?)').run(username, hash, role);
+  const { rows } = await pool.query(
+    'INSERT INTO users (username, password, role) VALUES ($1, $2, $3) RETURNING id',
+    [username, hash, role]
+  );
 
-  req.session.userId = result.lastInsertRowid;
+  req.session.userId = rows[0].id;
   req.session.username = username;
-  req.session.role = role;
-  const token = createAuthToken(result.lastInsertRowid, username);
-  res.json({ id: result.lastInsertRowid, username, role, token });
+  const token = createAuthToken(rows[0].id, username);
+  res.json({ id: rows[0].id, username, role, token });
 });
 
-app.post('/api/login', (req, res) => {
+app.post('/api/login', async (req, res) => {
   const { username, password } = req.body;
-  if (!username || !password) {
-    return res.status(400).json({ error: 'Vui lòng nhập đầy đủ thông tin' });
-  }
+  if (!username || !password) return res.status(400).json({ error: 'Vui lòng nhập đầy đủ thông tin' });
 
-  const user = db.prepare('SELECT * FROM users WHERE username = ?').get(username);
-  if (!user || !bcrypt.compareSync(password, user.password)) {
-    return res.status(401).json({ error: 'Sai username hoặc password' });
-  }
-
-  if (user.is_banned) {
-    return res.status(403).json({ error: 'Tài khoản đã bị khóa bởi admin' });
-  }
+  const { rows } = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
+  const user = rows[0];
+  if (!user || !bcrypt.compareSync(password, user.password)) return res.status(401).json({ error: 'Sai username hoặc password' });
+  if (user.is_banned) return res.status(403).json({ error: 'Tài khoản đã bị khóa bởi admin' });
 
   req.session.userId = user.id;
   req.session.username = user.username;
-  req.session.role = user.role;
   const token = createAuthToken(user.id, user.username);
   res.json({ id: user.id, username: user.username, role: user.role, token });
 });
@@ -263,18 +227,15 @@ app.post('/api/logout', (req, res) => {
   res.json({ ok: true });
 });
 
-app.get('/api/me', (req, res) => {
+app.get('/api/me', async (req, res) => {
   let userId = null;
   const tokenUser = resolveTokenUser(req);
-  if (tokenUser) {
-    userId = tokenUser.userId;
-  } else if (req.session.userId) {
-    userId = req.session.userId;
-  }
-  if (!userId) {
-    return res.status(401).json({ error: 'Chưa đăng nhập' });
-  }
-  const user = db.prepare('SELECT id, username, role, is_banned FROM users WHERE id = ?').get(userId);
+  if (tokenUser) userId = tokenUser.userId;
+  else if (req.session.userId) userId = req.session.userId;
+  if (!userId) return res.status(401).json({ error: 'Chưa đăng nhập' });
+
+  const { rows } = await pool.query('SELECT id, username, role, is_banned FROM users WHERE id = $1', [userId]);
+  const user = rows[0];
   if (!user || user.is_banned) {
     if (req.session) req.session.destroy();
     return res.status(401).json({ error: 'Tài khoản đã bị khóa' });
@@ -285,39 +246,37 @@ app.get('/api/me', (req, res) => {
 
 // --- USER & MESSAGE ROUTES ---
 
-app.get('/api/users', requireAuth, (req, res) => {
-  const users = db.prepare(`
+app.get('/api/users', requireAuth, async (req, res) => {
+  const { rows: users } = await pool.query(`
     SELECT u.id, u.username, u.role FROM users u
-    WHERE u.id != ? AND u.is_banned = 0 AND u.role != 'bot'
-      AND u.id NOT IN (SELECT blocked_id FROM blocked_users WHERE user_id = ?)
-  `).all(req.userId, req.userId);
-  // Always add bot at the beginning
+    WHERE u.id != $1 AND u.is_banned = 0 AND u.role != 'bot'
+      AND u.id NOT IN (SELECT blocked_id FROM blocked_users WHERE user_id = $1)
+  `, [req.userId]);
   users.unshift({ id: BOT_ID, username: BOT_USERNAME, role: 'bot' });
   res.json(users);
 });
 
-app.get('/api/messages/:userId', requireAuth, (req, res) => {
+app.get('/api/messages/:userId', requireAuth, async (req, res) => {
   const otherId = parseInt(req.params.userId);
-  const messages = db.prepare(`
+  const { rows: messages } = await pool.query(`
     SELECT m.*, u1.username as sender_name, u2.username as receiver_name
     FROM messages m
     JOIN users u1 ON m.sender_id = u1.id
     JOIN users u2 ON m.receiver_id = u2.id
-    WHERE (m.sender_id = ? AND m.receiver_id = ?)
-       OR (m.sender_id = ? AND m.receiver_id = ?)
+    WHERE (m.sender_id = $1 AND m.receiver_id = $2)
+       OR (m.sender_id = $2 AND m.receiver_id = $1)
     ORDER BY m.created_at ASC
     LIMIT 200
-  `).all(req.userId, otherId, otherId, req.userId);
+  `, [req.userId, otherId]);
 
-  // Attach reactions to each message
   const msgIds = messages.map(m => m.id);
   if (msgIds.length > 0) {
-    const placeholders = msgIds.map(() => '?').join(',');
-    const reactions = db.prepare(`
+    const placeholders = msgIds.map((_, i) => `$${i + 1}`).join(',');
+    const { rows: reactions } = await pool.query(`
       SELECT r.message_id, r.user_id, r.emoji, u.username
       FROM reactions r JOIN users u ON r.user_id = u.id
       WHERE r.message_id IN (${placeholders})
-    `).all(...msgIds);
+    `, msgIds);
 
     const reactMap = {};
     reactions.forEach(r => {
@@ -332,107 +291,93 @@ app.get('/api/messages/:userId', requireAuth, (req, res) => {
 
 // --- BLOCK ROUTES ---
 
-app.get('/api/blocked', requireAuth, (req, res) => {
-  const blocked = db.prepare(`
+app.get('/api/blocked', requireAuth, async (req, res) => {
+  const { rows } = await pool.query(`
     SELECT u.id, u.username FROM blocked_users b
-    JOIN users u ON b.blocked_id = u.id
-    WHERE b.user_id = ?
-  `).all(req.userId);
-  res.json(blocked);
+    JOIN users u ON b.blocked_id = u.id WHERE b.user_id = $1
+  `, [req.userId]);
+  res.json(rows);
 });
 
-app.post('/api/block/:userId', requireAuth, (req, res) => {
+app.post('/api/block/:userId', requireAuth, async (req, res) => {
   const blockedId = parseInt(req.params.userId);
-  if (blockedId === req.userId) {
-    return res.status(400).json({ error: 'Không thể tự block mình' });
-  }
-  db.prepare('INSERT OR IGNORE INTO blocked_users (user_id, blocked_id) VALUES (?, ?)').run(req.userId, blockedId);
+  if (blockedId === req.userId) return res.status(400).json({ error: 'Không thể tự block mình' });
+  await pool.query('INSERT INTO blocked_users (user_id, blocked_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [req.userId, blockedId]);
   res.json({ ok: true });
 });
 
-app.delete('/api/block/:userId', requireAuth, (req, res) => {
+app.delete('/api/block/:userId', requireAuth, async (req, res) => {
   const blockedId = parseInt(req.params.userId);
-  db.prepare('DELETE FROM blocked_users WHERE user_id = ? AND blocked_id = ?').run(req.userId, blockedId);
+  await pool.query('DELETE FROM blocked_users WHERE user_id = $1 AND blocked_id = $2', [req.userId, blockedId]);
   res.json({ ok: true });
 });
 
 // --- ADMIN ROUTES ---
 
-app.get('/api/admin/stats', requireAdmin, (req, res) => {
-  const totalUsers = db.prepare('SELECT COUNT(*) as c FROM users').get().c;
-  const bannedUsers = db.prepare('SELECT COUNT(*) as c FROM users WHERE is_banned = 1').get().c;
-  const totalMessages = db.prepare('SELECT COUNT(*) as c FROM messages').get().c;
-  const todayMessages = db.prepare("SELECT COUNT(*) as c FROM messages WHERE date(created_at) = date('now')").get().c;
-  res.json({ totalUsers, bannedUsers, totalMessages, todayMessages });
+app.get('/api/admin/stats', requireAdmin, async (req, res) => {
+  const [r1, r2, r3, r4] = await Promise.all([
+    pool.query('SELECT COUNT(*) as c FROM users'),
+    pool.query('SELECT COUNT(*) as c FROM users WHERE is_banned = 1'),
+    pool.query('SELECT COUNT(*) as c FROM messages'),
+    pool.query("SELECT COUNT(*) as c FROM messages WHERE created_at::date = CURRENT_DATE")
+  ]);
+  res.json({
+    totalUsers: parseInt(r1.rows[0].c),
+    bannedUsers: parseInt(r2.rows[0].c),
+    totalMessages: parseInt(r3.rows[0].c),
+    todayMessages: parseInt(r4.rows[0].c)
+  });
 });
 
-app.get('/api/admin/users', requireAdmin, (req, res) => {
-  const users = db.prepare(`
+app.get('/api/admin/users', requireAdmin, async (req, res) => {
+  const { rows } = await pool.query(`
     SELECT u.id, u.username, u.role, u.is_banned, u.created_at,
       (SELECT COUNT(*) FROM messages WHERE sender_id = u.id) as message_count
     FROM users u ORDER BY u.created_at DESC
-  `).all();
-  res.json(users);
+  `);
+  rows.forEach(r => { r.message_count = parseInt(r.message_count); });
+  res.json(rows);
 });
 
-app.post('/api/admin/ban/:userId', requireAdmin, (req, res) => {
+app.post('/api/admin/ban/:userId', requireAdmin, async (req, res) => {
   const targetId = parseInt(req.params.userId);
-  if (targetId === req.userId) {
-    return res.status(400).json({ error: 'Không thể tự ban mình' });
-  }
-  const target = db.prepare('SELECT role FROM users WHERE id = ?').get(targetId);
-  if (target && target.role === 'admin') {
-    return res.status(400).json({ error: 'Không thể ban admin khác' });
-  }
-  db.prepare('UPDATE users SET is_banned = 1 WHERE id = ?').run(targetId);
-
-  // Kick banned user offline
-  const sockets = onlineUsers.get(targetId);
-  if (sockets) {
-    sockets.forEach(sid => io.sockets.sockets.get(sid)?.disconnect());
-    onlineUsers.delete(targetId);
-  }
-  res.json({ ok: true });
-});
-
-app.post('/api/admin/unban/:userId', requireAdmin, (req, res) => {
-  const targetId = parseInt(req.params.userId);
-  db.prepare('UPDATE users SET is_banned = 0 WHERE id = ?').run(targetId);
-  res.json({ ok: true });
-});
-
-app.delete('/api/admin/users/:userId', requireAdmin, (req, res) => {
-  const targetId = parseInt(req.params.userId);
-  if (targetId === req.userId) {
-    return res.status(400).json({ error: 'Không thể xoá chính mình' });
-  }
-  const target = db.prepare('SELECT role FROM users WHERE id = ?').get(targetId);
-  if (target && target.role === 'admin') {
-    return res.status(400).json({ error: 'Không thể xoá admin khác' });
-  }
-
-  db.prepare('DELETE FROM messages WHERE sender_id = ? OR receiver_id = ?').run(targetId, targetId);
-  db.prepare('DELETE FROM blocked_users WHERE user_id = ? OR blocked_id = ?').run(targetId, targetId);
-  db.prepare('DELETE FROM users WHERE id = ?').run(targetId);
+  if (targetId === req.userId) return res.status(400).json({ error: 'Không thể tự ban mình' });
+  const { rows } = await pool.query('SELECT role FROM users WHERE id = $1', [targetId]);
+  if (rows[0]?.role === 'admin') return res.status(400).json({ error: 'Không thể ban admin khác' });
+  await pool.query('UPDATE users SET is_banned = 1 WHERE id = $1', [targetId]);
 
   const sockets = onlineUsers.get(targetId);
-  if (sockets) {
-    sockets.forEach(sid => io.sockets.sockets.get(sid)?.disconnect());
-    onlineUsers.delete(targetId);
-  }
+  if (sockets) { sockets.forEach(sid => io.sockets.sockets.get(sid)?.disconnect()); onlineUsers.delete(targetId); }
   res.json({ ok: true });
 });
 
-app.post('/api/admin/role/:userId', requireAdmin, (req, res) => {
+app.post('/api/admin/unban/:userId', requireAdmin, async (req, res) => {
+  await pool.query('UPDATE users SET is_banned = 0 WHERE id = $1', [parseInt(req.params.userId)]);
+  res.json({ ok: true });
+});
+
+app.delete('/api/admin/users/:userId', requireAdmin, async (req, res) => {
+  const targetId = parseInt(req.params.userId);
+  if (targetId === req.userId) return res.status(400).json({ error: 'Không thể xoá chính mình' });
+  const { rows } = await pool.query('SELECT role FROM users WHERE id = $1', [targetId]);
+  if (rows[0]?.role === 'admin') return res.status(400).json({ error: 'Không thể xoá admin khác' });
+
+  await pool.query('DELETE FROM reactions WHERE message_id IN (SELECT id FROM messages WHERE sender_id = $1 OR receiver_id = $1)', [targetId]);
+  await pool.query('DELETE FROM messages WHERE sender_id = $1 OR receiver_id = $1', [targetId]);
+  await pool.query('DELETE FROM blocked_users WHERE user_id = $1 OR blocked_id = $1', [targetId]);
+  await pool.query('DELETE FROM users WHERE id = $1', [targetId]);
+
+  const sockets = onlineUsers.get(targetId);
+  if (sockets) { sockets.forEach(sid => io.sockets.sockets.get(sid)?.disconnect()); onlineUsers.delete(targetId); }
+  res.json({ ok: true });
+});
+
+app.post('/api/admin/role/:userId', requireAdmin, async (req, res) => {
   const targetId = parseInt(req.params.userId);
   const { role } = req.body;
-  if (!['admin', 'user'].includes(role)) {
-    return res.status(400).json({ error: 'Role không hợp lệ' });
-  }
-  if (targetId === req.userId) {
-    return res.status(400).json({ error: 'Không thể đổi role của chính mình' });
-  }
-  db.prepare('UPDATE users SET role = ? WHERE id = ?').run(role, targetId);
+  if (!['admin', 'user'].includes(role)) return res.status(400).json({ error: 'Role không hợp lệ' });
+  if (targetId === req.userId) return res.status(400).json({ error: 'Không thể đổi role của chính mình' });
+  await pool.query('UPDATE users SET role = $1 WHERE id = $2', [role, targetId]);
   res.json({ ok: true });
 });
 
@@ -440,55 +385,44 @@ app.post('/api/admin/role/:userId', requireAdmin, (req, res) => {
 
 const onlineUsers = new Map();
 
-io.on('connection', (socket) => {
+io.on('connection', async (socket) => {
   const userId = socket.userId;
   const username = socket.username;
+  if (!userId) { socket.disconnect(); return; }
 
-  if (!userId) {
-    socket.disconnect();
-    return;
-  }
+  const { rows } = await pool.query('SELECT is_banned FROM users WHERE id = $1', [userId]);
+  if (!rows[0] || rows[0].is_banned) { socket.disconnect(); return; }
 
-  const user = db.prepare('SELECT is_banned FROM users WHERE id = ?').get(userId);
-  if (!user || user.is_banned) {
-    socket.disconnect();
-    return;
-  }
-
-  if (!onlineUsers.has(userId)) {
-    onlineUsers.set(userId, new Set());
-  }
+  if (!onlineUsers.has(userId)) onlineUsers.set(userId, new Set());
   onlineUsers.get(userId).add(socket.id);
 
   function broadcastOnline() {
-    const online = Array.from(onlineUsers.keys());
-    io.emit('online_users', online);
+    io.emit('online_users', Array.from(onlineUsers.keys()));
   }
   broadcastOnline();
 
-  socket.on('send_message', (data, callback) => {
+  socket.on('send_message', async (data, callback) => {
     const { receiverId, content, tempId } = data;
     if (!content || !content.trim() || !receiverId) return;
 
-    const blocked = db.prepare(`
-      SELECT 1 FROM blocked_users
-      WHERE (user_id = ? AND blocked_id = ?) OR (user_id = ? AND blocked_id = ?)
-    `).get(userId, receiverId, receiverId, userId);
-
-    if (blocked) {
+    const { rows: blocked } = await pool.query(
+      'SELECT 1 FROM blocked_users WHERE (user_id = $1 AND blocked_id = $2) OR (user_id = $2 AND blocked_id = $1)',
+      [userId, receiverId]
+    );
+    if (blocked.length > 0) {
       socket.emit('error_message', { error: 'Không thể gửi tin nhắn cho người này' });
       if (callback) callback({ success: false, error: 'blocked' });
       return;
     }
 
     const sanitized = content.trim().slice(0, 2000);
-
-    const result = db.prepare(
-      'INSERT INTO messages (sender_id, receiver_id, content) VALUES (?, ?, ?)'
-    ).run(userId, receiverId, sanitized);
+    const { rows: inserted } = await pool.query(
+      'INSERT INTO messages (sender_id, receiver_id, content) VALUES ($1, $2, $3) RETURNING id',
+      [userId, receiverId, sanitized]
+    );
 
     const message = {
-      id: result.lastInsertRowid,
+      id: inserted[0].id,
       sender_id: userId,
       receiver_id: receiverId,
       sender_name: username,
@@ -496,106 +430,92 @@ io.on('connection', (socket) => {
       created_at: new Date().toISOString()
     };
 
-    // ACK back to sender with real ID
-    if (callback) callback({ success: true, messageId: result.lastInsertRowid, tempId });
-
+    if (callback) callback({ success: true, messageId: inserted[0].id, tempId });
     socket.emit('new_message', message);
 
-    // If sending to bot, generate AI reply
     if (receiverId === BOT_ID) {
-      getBotReply(sanitized).then(reply => {
-        const botResult = db.prepare(
-          'INSERT INTO messages (sender_id, receiver_id, content) VALUES (?, ?, ?)'
-        ).run(BOT_ID, userId, reply);
-
+      getBotReply(sanitized).then(async (reply) => {
+        const { rows: botInserted } = await pool.query(
+          'INSERT INTO messages (sender_id, receiver_id, content) VALUES ($1, $2, $3) RETURNING id',
+          [BOT_ID, userId, reply]
+        );
         const botMessage = {
-          id: botResult.lastInsertRowid,
+          id: botInserted[0].id,
           sender_id: BOT_ID,
           receiver_id: userId,
           sender_name: BOT_USERNAME,
           content: reply,
           created_at: new Date().toISOString()
         };
-
-        // Send bot reply to user
         const userSockets = onlineUsers.get(userId);
-        if (userSockets) {
-          userSockets.forEach(sid => io.to(sid).emit('new_message', botMessage));
-        }
+        if (userSockets) userSockets.forEach(sid => io.to(sid).emit('new_message', botMessage));
       });
     } else {
       const receiverSockets = onlineUsers.get(receiverId);
-      if (receiverSockets) {
-        receiverSockets.forEach(sid => {
-          io.to(sid).emit('new_message', message);
-        });
-      }
+      if (receiverSockets) receiverSockets.forEach(sid => io.to(sid).emit('new_message', message));
     }
   });
 
-  socket.on('add_reaction', (data) => {
+  socket.on('add_reaction', async (data) => {
     const { messageId, emoji } = data;
     if (!messageId || !emoji) return;
 
-    const msg = db.prepare('SELECT sender_id, receiver_id FROM messages WHERE id = ?').get(messageId);
-    if (!msg) return;
-    // Only allow reacting to messages in your conversations
-    if (msg.sender_id !== userId && msg.receiver_id !== userId) return;
+    const { rows: msgs } = await pool.query('SELECT sender_id, receiver_id FROM messages WHERE id = $1', [messageId]);
+    if (!msgs[0]) return;
+    if (msgs[0].sender_id !== userId && msgs[0].receiver_id !== userId) return;
 
-    db.prepare('INSERT OR REPLACE INTO reactions (message_id, user_id, emoji) VALUES (?, ?, ?)').run(messageId, userId, emoji);
+    await pool.query(
+      'INSERT INTO reactions (message_id, user_id, emoji) VALUES ($1, $2, $3) ON CONFLICT (message_id, user_id) DO UPDATE SET emoji = $3',
+      [messageId, userId, emoji]
+    );
 
     const reaction = { messageId, userId, emoji, username };
-    // Notify both parties
-    const otherId = msg.sender_id === userId ? msg.receiver_id : msg.sender_id;
+    const otherId = msgs[0].sender_id === userId ? msgs[0].receiver_id : msgs[0].sender_id;
     socket.emit('reaction_updated', reaction);
     const otherSockets = onlineUsers.get(otherId);
-    if (otherSockets) {
-      otherSockets.forEach(sid => io.to(sid).emit('reaction_updated', reaction));
-    }
+    if (otherSockets) otherSockets.forEach(sid => io.to(sid).emit('reaction_updated', reaction));
   });
 
-  socket.on('remove_reaction', (data) => {
+  socket.on('remove_reaction', async (data) => {
     const { messageId } = data;
     if (!messageId) return;
 
-    db.prepare('DELETE FROM reactions WHERE message_id = ? AND user_id = ?').run(messageId, userId);
+    await pool.query('DELETE FROM reactions WHERE message_id = $1 AND user_id = $2', [messageId, userId]);
 
-    const msg = db.prepare('SELECT sender_id, receiver_id FROM messages WHERE id = ?').get(messageId);
-    if (!msg) return;
+    const { rows: msgs } = await pool.query('SELECT sender_id, receiver_id FROM messages WHERE id = $1', [messageId]);
+    if (!msgs[0]) return;
 
     const removal = { messageId, userId, emoji: null };
-    const otherId = msg.sender_id === userId ? msg.receiver_id : msg.sender_id;
+    const otherId = msgs[0].sender_id === userId ? msgs[0].receiver_id : msgs[0].sender_id;
     socket.emit('reaction_updated', removal);
     const otherSockets = onlineUsers.get(otherId);
-    if (otherSockets) {
-      otherSockets.forEach(sid => io.to(sid).emit('reaction_updated', removal));
-    }
+    if (otherSockets) otherSockets.forEach(sid => io.to(sid).emit('reaction_updated', removal));
   });
 
   socket.on('typing', (receiverId) => {
     const receiverSockets = onlineUsers.get(receiverId);
-    if (receiverSockets) {
-      receiverSockets.forEach(sid => {
-        io.to(sid).emit('user_typing', { userId, username });
-      });
-    }
+    if (receiverSockets) receiverSockets.forEach(sid => io.to(sid).emit('user_typing', { userId, username }));
   });
 
   socket.on('disconnect', () => {
     const sockets = onlineUsers.get(userId);
     if (sockets) {
       sockets.delete(socket.id);
-      if (sockets.size === 0) {
-        onlineUsers.delete(userId);
-      }
+      if (sockets.size === 0) onlineUsers.delete(userId);
     }
     broadcastOnline();
   });
 });
 
+// --- START ---
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
-server.listen(PORT, HOST, () => {
-  console.log(`Server chạy tại http://localhost:${PORT}`);
-  console.log(`Mạng LAN / Remote: http://0.0.0.0:${PORT}`);
+
+initDB().then(() => {
+  server.listen(PORT, HOST, () => {
+    console.log(`Server chạy tại http://localhost:${PORT}`);
+  });
+}).catch(err => {
+  console.error('Database init failed:', err);
+  process.exit(1);
 });
