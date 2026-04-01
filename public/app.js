@@ -207,9 +207,34 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
+function mathSymbols(text) {
+  return text
+    .replace(/sqrt\(([^)]+)\)/gi, '√($1)')
+    .replace(/sqrt/gi, '√')
+    .replace(/\^2(?![0-9])/g, '²')
+    .replace(/\^3(?![0-9])/g, '³')
+    .replace(/\^4(?![0-9])/g, '⁴')
+    .replace(/\^n(?![a-z])/gi, 'ⁿ')
+    .replace(/\bDelta\b/g, 'Δ')
+    .replace(/\bdelta\b/g, 'δ')
+    .replace(/\bpi\b/gi, 'π')
+    .replace(/\binfinity\b/gi, '∞')
+    .replace(/!==/g, '≢')
+    .replace(/!=/g, '≠')
+    .replace(/<=/g, '≤')
+    .replace(/>=/g, '≥')
+    .replace(/~=/g, '≈')
+    .replace(/\+-/g, '±')
+    .replace(/\+\/-/g, '±')
+    .replace(/->/g, '→')
+    .replace(/=>/g, '⇒');
+}
+
 function renderMessageContent(text) {
   // First escape HTML to prevent XSS
   let html = escapeHtml(text);
+  // Replace math text with Unicode symbols
+  html = mathSymbols(html);
   // Code blocks (``` ... ```) - must be before inline code
   html = html.replace(/```([\s\S]*?)```/g, function(match, code) {
     return '<pre><code>' + code.replace(/^\n/, '') + '</code></pre>';
