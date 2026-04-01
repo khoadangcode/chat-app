@@ -185,103 +185,77 @@ if (process.env.GEMINI_API_KEY) {
   console.log('Gemini AI Bot enabled');
 }
 
-// --- BOT CONVERSATION HISTORY ---
-const botConversations = new Map(); // userId -> { history: [{role, parts}], lastActivity: timestamp }
+// --- BOT CONVERSATION (simple text history + queue) ---
+const botConversations = new Map(); // userId -> { messages: [{role, text}], lastActivity }
 const BOT_MAX_HISTORY = 20;
-const BOT_HISTORY_TIMEOUT = 30 * 60 * 1000; // 30 minutes
+const BOT_HISTORY_TIMEOUT = 30 * 60 * 1000;
+const botQueues = new Map();
 
-// Clean up stale conversations every 10 minutes
 setInterval(() => {
   const now = Date.now();
   for (const [uid, conv] of botConversations) {
-    if (now - conv.lastActivity > BOT_HISTORY_TIMEOUT) {
-      botConversations.delete(uid);
-    }
+    if (now - conv.lastActivity > BOT_HISTORY_TIMEOUT) botConversations.delete(uid);
   }
 }, 10 * 60 * 1000);
 
-// --- BOT MESSAGE QUEUE (prevent race conditions) ---
-const botQueues = new Map(); // userId -> Promise
-
 function queueBotReply(userId, prompt, imageData) {
   const prev = botQueues.get(userId) || Promise.resolve();
-  const next = prev.then(() => getBotReply(prompt, imageData, userId)).catch(() => 'Ối, lỗi rồi 😵');
+  const next = prev.then(() => getBotReply(prompt, imageData, userId)).catch(e => {
+    console.error('Queue error:', e.message);
+    return 'Ối, mình bị lỗi rồi 😵 Thử lại sau nhé!';
+  });
   botQueues.set(userId, next);
   return next;
-}
-
-function stripImagesFromHistory(history) {
-  return history.map(entry => ({
-    role: entry.role,
-    parts: entry.parts.map(part => {
-      if (part.inlineData) {
-        return { text: '[Hình ảnh đã gửi trước đó]' };
-      }
-      return part;
-    })
-  }));
 }
 
 async function getBotReply(userMessage, imageData, userId) {
   if (!geminiModel) return 'Xin lỗi, AI Bot chưa được kích hoạt 🔑';
 
-  // Get or create conversation for this user
+  // Get or create simple conversation
   if (!botConversations.has(userId)) {
-    botConversations.set(userId, { history: [], lastActivity: Date.now() });
+    botConversations.set(userId, { messages: [], lastActivity: Date.now() });
   }
   const conv = botConversations.get(userId);
-
-  // Check timeout - reset if stale
-  if (Date.now() - conv.lastActivity > BOT_HISTORY_TIMEOUT) {
-    conv.history = [];
-  }
+  if (Date.now() - conv.lastActivity > BOT_HISTORY_TIMEOUT) conv.messages = [];
   conv.lastActivity = Date.now();
 
-  // Build current message parts (text only for history, image only for current call)
-  const textParts = [{ text: userMessage || 'Hãy mô tả hình ảnh này.' }];
-  const sendParts = [...textParts];
-  if (imageData) {
-    sendParts.push({ inlineData: { mimeType: imageData.mimeType, data: imageData.base64 } });
+  // Build context from history as plain text
+  let contextLines = '';
+  if (conv.messages.length > 0) {
+    contextLines = 'Lịch sử cuộc trò chuyện:\n';
+    for (const m of conv.messages) {
+      contextLines += (m.role === 'user' ? 'Người dùng' : 'Bot') + ': ' + m.text + '\n';
+    }
+    contextLines += '---\n';
   }
 
-  // Try with conversation history first
+  const currentText = userMessage || 'Hãy mô tả hình ảnh này.';
+  const fullPrompt = contextLines + 'Người dùng: ' + currentText;
+
+  // Build parts for Gemini
+  const parts = [{ text: fullPrompt }];
+  if (imageData) {
+    parts.push({ inlineData: { mimeType: imageData.mimeType, data: imageData.base64 } });
+  }
+
   try {
-    const sanitizedHistory = stripImagesFromHistory(conv.history);
-    const chat = geminiModel.startChat({ history: sanitizedHistory });
-    const result = await chat.sendMessage(sendParts);
+    const result = await geminiModel.generateContent(parts);
     const reply = result.response.text().slice(0, 4000);
 
-    // Store ONLY text parts in history (no base64 image data)
-    conv.history.push({ role: 'user', parts: textParts });
-    conv.history.push({ role: 'model', parts: [{ text: reply }] });
-
-    // If image was sent, add a note about it in the user's history text
-    if (imageData) {
-      conv.history[conv.history.length - 2] = {
-        role: 'user',
-        parts: [{ text: (userMessage || 'Hãy mô tả hình ảnh này.') + '\n[Người dùng đã gửi kèm một hình ảnh]' }]
-      };
-    }
-
-    // Trim history
-    while (conv.history.length > BOT_MAX_HISTORY) {
-      conv.history.shift();
-    }
+    // Store in simple format (text only, no image data)
+    const userText = imageData ? currentText + ' [kèm hình ảnh]' : currentText;
+    conv.messages.push({ role: 'user', text: userText });
+    conv.messages.push({ role: 'bot', text: reply });
+    while (conv.messages.length > BOT_MAX_HISTORY) conv.messages.shift();
 
     return reply;
   } catch (err) {
-    console.error('Gemini error with history:', err.message);
-    // Reset history on error to prevent cascading failures
-    conv.history = [];
-
-    // Fallback: try without history
+    console.error('Gemini error:', err.message);
+    // Reset history and try one more time without context
+    conv.messages = [];
     try {
-      const result = await geminiModel.generateContent(sendParts);
-      const reply = result.response.text().slice(0, 4000);
-      // Start fresh history with this exchange
-      conv.history.push({ role: 'user', parts: textParts });
-      conv.history.push({ role: 'model', parts: [{ text: reply }] });
-      return reply;
+      const result = await geminiModel.generateContent(parts.map(p => p.inlineData ? p : { text: currentText }));
+      return result.response.text().slice(0, 4000);
     } catch (err2) {
       console.error('Gemini fallback error:', err2.message);
       return 'Ối, mình bị lỗi rồi 😵 Thử lại sau nhé!';
