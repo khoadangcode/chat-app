@@ -238,7 +238,7 @@ async function getBotReply(userMessage, imageData, userId) {
     // Use Gemini chat API with history
     const chat = geminiModel.startChat({ history: sanitizedHistory });
     const result = await chat.sendMessage(currentParts);
-    const reply = result.response.text().slice(0, 2000);
+    const reply = result.response.text().slice(0, 4000);
 
     // Store current user message and bot response in history
     conv.history.push({ role: 'user', parts: currentParts });

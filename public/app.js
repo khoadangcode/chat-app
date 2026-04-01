@@ -207,6 +207,24 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
+function renderMessageContent(text) {
+  // First escape HTML to prevent XSS
+  let html = escapeHtml(text);
+  // Code blocks (``` ... ```) - must be before inline code
+  html = html.replace(/```([\s\S]*?)```/g, function(match, code) {
+    return '<pre><code>' + code.replace(/^\n/, '') + '</code></pre>';
+  });
+  // Inline code (`...`)
+  html = html.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+  // Bold (**...**)
+  html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  // Italic (*...*)
+  html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
+  // Line breaks
+  html = html.replace(/\n/g, '<br>');
+  return html;
+}
+
 function formatLastSeen(lastSeenStr) {
   if (!lastSeenStr) return 'Offline';
   const lastSeen = new Date(lastSeenStr);
@@ -923,7 +941,7 @@ function createMessageEl(msg, animate = true, isGroupMsg = false) {
     const stickerEmoji = msg.content.replace('[sticker]', '').trim();
     el.innerHTML = `${senderLabel}${replyHtml}<span class="sticker-display">${stickerEmoji}</span><span class="time">${editedBadge}${formatTime(msg.created_at)}${status}</span>`;
   } else {
-    el.innerHTML = `${senderLabel}${replyHtml}<span class="msg-content">${escapeHtml(msg.content)}</span><span class="time">${editedBadge}${formatTime(msg.created_at)}${status}</span>`;
+    el.innerHTML = `${senderLabel}${replyHtml}<span class="msg-content">${renderMessageContent(msg.content)}</span><span class="time">${editedBadge}${formatTime(msg.created_at)}${status}</span>`;
   }
 
   if (!isDeleted) {
