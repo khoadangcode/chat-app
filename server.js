@@ -322,7 +322,33 @@ app.put('/api/profile', requireAuth, async (req, res) => {
   res.json(rows[0]);
 });
 
+// --- Pool error handler ---
+pool.on('error', (err) => {
+  console.error('Unexpected idle client error:', err);
+});
+
 // --- USER & MESSAGE ROUTES ---
+
+// Message Search (MUST be before /api/messages/:userId)
+app.get('/api/messages/search/:userId', requireAuth, async (req, res) => {
+  const otherId = parseInt(req.params.userId);
+  const q = (req.query.q || '').trim();
+  if (!q || q.length < 2) return res.json([]);
+
+  const { rows: messages } = await pool.query(`
+    SELECT m.id, m.sender_id, m.receiver_id, m.content, m.created_at, m.is_deleted,
+      u1.username as sender_name, u1.display_name as sender_display_name
+    FROM messages m
+    JOIN users u1 ON m.sender_id = u1.id
+    WHERE ((m.sender_id = $1 AND m.receiver_id = $2) OR (m.sender_id = $2 AND m.receiver_id = $1))
+      AND m.is_deleted = 0
+      AND LOWER(m.content) LIKE $3
+    ORDER BY m.created_at DESC
+    LIMIT 50
+  `, [req.userId, otherId, `%${q.toLowerCase()}%`]);
+
+  res.json(messages);
+});
 
 app.get('/api/users', requireAuth, async (req, res) => {
   const { rows: users } = await pool.query(`
@@ -399,28 +425,6 @@ app.get('/api/messages/:userId', requireAuth, async (req, res) => {
     });
     messages.forEach(m => { m.reactions = reactMap[m.id] || []; });
   }
-
-  res.json(messages);
-});
-
-// --- Message Search ---
-
-app.get('/api/messages/search/:userId', requireAuth, async (req, res) => {
-  const otherId = parseInt(req.params.userId);
-  const q = (req.query.q || '').trim();
-  if (!q || q.length < 2) return res.json([]);
-
-  const { rows: messages } = await pool.query(`
-    SELECT m.id, m.sender_id, m.receiver_id, m.content, m.created_at, m.is_deleted,
-      u1.username as sender_name, u1.display_name as sender_display_name
-    FROM messages m
-    JOIN users u1 ON m.sender_id = u1.id
-    WHERE ((m.sender_id = $1 AND m.receiver_id = $2) OR (m.sender_id = $2 AND m.receiver_id = $1))
-      AND m.is_deleted = 0
-      AND LOWER(m.content) LIKE $3
-    ORDER BY m.created_at DESC
-    LIMIT 50
-  `, [req.userId, otherId, `%${q.toLowerCase()}%`]);
 
   res.json(messages);
 });
@@ -717,8 +721,14 @@ io.on('connection', async (socket) => {
   const username = socket.username;
   if (!userId) { socket.disconnect(); return; }
 
-  const { rows } = await pool.query('SELECT is_banned FROM users WHERE id = $1', [userId]);
-  if (!rows[0] || rows[0].is_banned) { socket.disconnect(); return; }
+  try {
+    const { rows } = await pool.query('SELECT is_banned FROM users WHERE id = $1', [userId]);
+    if (!rows[0] || rows[0].is_banned) { socket.disconnect(); return; }
+  } catch (err) {
+    console.error('Connection check error:', err.message);
+    socket.disconnect();
+    return;
+  }
 
   if (!onlineUsers.has(userId)) onlineUsers.set(userId, new Set());
   onlineUsers.get(userId).add(socket.id);
