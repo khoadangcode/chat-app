@@ -2,7 +2,13 @@
 <html lang="vi">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#5b5ea6">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Chat App">
+  <link rel="apple-touch-icon" href="/icons/icon-192.png">
+  <link rel="manifest" href="/manifest.json">
   <title>Chat App</title>
   <link rel="stylesheet" href="style.css">
 </head>
@@ -245,6 +251,16 @@
         <div class="stat-value" id="stat-total-messages">0</div>
         <div class="stat-label">Tổng tin nhắn</div>
       </div>
+      <div class="stat-card stat-card-refresh">
+        <button id="admin-refresh-btn" class="admin-refresh-btn" title="Làm mới thống kê">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="23 4 23 10 17 10"/>
+            <polyline points="1 20 1 14 7 14"/>
+            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+          </svg>
+          <span>Làm mới</span>
+        </button>
+      </div>
     </div>
 
     <div class="admin-table-wrap">
@@ -253,6 +269,7 @@
         <thead>
           <tr>
             <th>Username</th>
+            <th>Tên hiển thị</th>
             <th>Vai trò</th>
             <th>Trạng thái</th>
             <th>Tin nhắn</th>
@@ -267,5 +284,10 @@
 
   <script src="/socket.io/socket.io.js"></script>
   <script src="app.js"></script>
+  <script>
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/sw.js').catch(() => {});
+    }
+  </script>
 </body>
 </html>
