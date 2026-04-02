@@ -200,7 +200,7 @@ if (process.env.GEMINI_API_KEY && !apiKeys.includes(process.env.GEMINI_API_KEY))
 }
 
 // Multiple models as fallback — each model has its own quota pool
-const GEMINI_MODELS = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-2.0-flash-lite'];
+const GEMINI_MODELS = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.0-flash-lite'];
 
 // Build array: [{model, genAI, keyIndex, modelName}]
 const geminiInstances = [];
