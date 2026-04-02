@@ -199,31 +199,29 @@ if (process.env.GEMINI_API_KEY && !apiKeys.includes(process.env.GEMINI_API_KEY))
   apiKeys.push(process.env.GEMINI_API_KEY);
 }
 
-// Use gemini-2.0-flash for higher free tier quota (15 RPM, 1500 RPD)
-const GEMINI_MODEL = 'gemini-2.0-flash';
+// Multiple models as fallback — each model has its own quota pool
+const GEMINI_MODELS = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-2.0-flash-lite'];
 
-for (const key of apiKeys) {
-  const genAI = new GoogleGenerativeAI(key);
-  geminiModels.push(genAI.getGenerativeModel({
-    model: GEMINI_MODEL,
-    systemInstruction: BOT_SYSTEM_PROMPT
-  }));
+// Build array: [{model, genAI, keyIndex, modelName}]
+const geminiInstances = [];
+for (let ki = 0; ki < apiKeys.length; ki++) {
+  const genAI = new GoogleGenerativeAI(apiKeys[ki]);
+  for (const modelName of GEMINI_MODELS) {
+    geminiInstances.push({
+      model: genAI.getGenerativeModel({ model: modelName, systemInstruction: BOT_SYSTEM_PROMPT }),
+      keyIndex: ki,
+      modelName
+    });
+  }
 }
-if (geminiModels.length > 0) {
-  console.log(`Gemini AI Bot enabled: ${geminiModels.length} key(s), model: ${GEMINI_MODEL}`);
+if (apiKeys.length > 0) {
+  console.log(`Gemini AI Bot enabled: ${apiKeys.length} key(s), ${GEMINI_MODELS.length} models = ${geminiInstances.length} combinations`);
 }
 
-// Get next model (round-robin rotation)
-function getNextModel() {
-  if (geminiModels.length === 0) return null;
-  const model = geminiModels[currentModelIndex];
-  currentModelIndex = (currentModelIndex + 1) % geminiModels.length;
-  return model;
-}
 
 // --- RATE LIMITER (per-key) ---
-const keyLastUsed = new Map(); // keyIndex -> timestamp
-const KEY_MIN_INTERVAL = 400; // minimum ms between requests per key
+const keyLastUsed = new Map();
+const KEY_MIN_INTERVAL = 300;
 
 async function waitForKey(keyIndex) {
   const last = keyLastUsed.get(keyIndex) || 0;
@@ -234,59 +232,61 @@ async function waitForKey(keyIndex) {
   keyLastUsed.set(keyIndex, Date.now());
 }
 
-// --- RETRY WITH BACKOFF (try ALL keys before waiting) ---
-// Track which keys are temporarily blocked (cooldown after 429)
-const keyCooldownUntil = new Map(); // keyIndex -> timestamp
-
 function isRetryableError(err) {
   if (!err || !err.message) return false;
   return err.message.includes('429') || err.message.includes('RESOURCE_EXHAUSTED') || err.message.includes('503');
 }
 
-async function callGeminiWithRetry(parts, maxRounds = 4) {
-  if (geminiModels.length === 0) throw new Error('No API keys configured');
+// Track failed combos so we don't retry them immediately
+const failedCombos = new Map(); // "keyIndex-modelName" -> timestamp
+
+async function callGeminiWithRetry(parts) {
+  if (geminiInstances.length === 0) throw new Error('No API keys configured');
   let lastError;
 
-  for (let round = 0; round < maxRounds; round++) {
-    // Try each key in this round
-    for (let i = 0; i < geminiModels.length; i++) {
-      const keyIndex = (currentModelIndex + i) % geminiModels.length;
-      const model = geminiModels[keyIndex];
+  // Try all key+model combinations
+  for (const inst of geminiInstances) {
+    const comboKey = `${inst.keyIndex}-${inst.modelName}`;
+    const failedAt = failedCombos.get(comboKey) || 0;
+    // Skip combos that failed in the last 30 seconds
+    if (Date.now() - failedAt < 30000) continue;
 
-      // Skip keys that are in cooldown
-      const cooldown = keyCooldownUntil.get(keyIndex) || 0;
-      if (Date.now() < cooldown) {
-        console.log(`Key ${keyIndex + 1} still in cooldown, skipping...`);
+    await waitForKey(inst.keyIndex);
+
+    try {
+      const result = await inst.model.generateContent(parts);
+      console.log(`Gemini OK: key ${inst.keyIndex + 1}, model ${inst.modelName}`);
+      return result;
+    } catch (err) {
+      lastError = err;
+      if (isRetryableError(err)) {
+        failedCombos.set(comboKey, Date.now());
+        console.log(`Rate limited: key ${inst.keyIndex + 1}, model ${inst.modelName}`);
         continue;
       }
-
-      await waitForKey(keyIndex);
-
-      try {
-        const result = await model.generateContent(parts);
-        currentModelIndex = (keyIndex + 1) % geminiModels.length;
-        return result;
-      } catch (err) {
-        lastError = err;
-        if (isRetryableError(err)) {
-          // Put this key on cooldown for 15 seconds
-          keyCooldownUntil.set(keyIndex, Date.now() + 15000);
-          console.log(`Key ${keyIndex + 1}/${geminiModels.length} rate limited, cooldown 15s`);
-          continue;
-        }
-        throw err;
-      }
-    }
-
-    // All keys failed this round — wait before next round
-    if (round < maxRounds - 1) {
-      const delay = Math.min(10000 * (round + 1), 30000); // 10s, 20s, 30s
-      console.log(`All keys rate limited (round ${round + 1}/${maxRounds}), waiting ${delay / 1000}s...`);
-      await new Promise(r => setTimeout(r, delay));
-      // Clear cooldowns for next round retry
-      keyCooldownUntil.clear();
+      // Non-retryable but not fatal (e.g. model not found) — try next
+      console.log(`Error (key ${inst.keyIndex + 1}, ${inst.modelName}): ${err.message.slice(0, 100)}`);
+      failedCombos.set(comboKey, Date.now());
+      continue;
     }
   }
+
+  // All combos failed — wait 15s and try once more with cleared cooldowns
+  console.log('All combos failed, waiting 15s for final retry...');
+  await new Promise(r => setTimeout(r, 15000));
+  failedCombos.clear();
+
+  for (const inst of geminiInstances) {
+    try {
+      const result = await inst.model.generateContent(parts);
+      console.log(`Gemini OK (retry): key ${inst.keyIndex + 1}, model ${inst.modelName}`);
+      return result;
+    } catch (err) {
+      lastError = err;
+      continue;
+    }
+  }
+
   throw lastError;
 }
 
@@ -314,7 +314,7 @@ function queueBotReply(userId, prompt, imageData) {
 }
 
 async function getBotReply(userMessage, imageData, userId) {
-  if (geminiModels.length === 0) return 'Xin lỗi, AI Bot chưa được kích hoạt 🔑';
+  if (geminiInstances.length === 0) return 'Xin lỗi, AI Bot chưa được kích hoạt 🔑';
 
   // Get or create simple conversation
   if (!botConversations.has(userId)) {
@@ -364,29 +364,31 @@ async function getBotReply(userMessage, imageData, userId) {
   }
 }
 
-// --- DEBUG: Test Gemini API (test each key individually) ---
+// --- DEBUG: Test Gemini API (test each key+model combo) ---
 app.get('/api/bot-test', async (req, res) => {
-  if (geminiModels.length === 0) return res.json({ ok: false, error: 'No API keys configured' });
+  if (geminiInstances.length === 0) return res.json({ ok: false, error: 'No API keys configured' });
 
   const results = [];
-  for (let i = 0; i < geminiModels.length; i++) {
-    const keyHint = apiKeys[i] ? '...' + apiKeys[i].slice(-4) : '?';
+  for (const inst of geminiInstances) {
+    const keyHint = apiKeys[inst.keyIndex] ? '...' + apiKeys[inst.keyIndex].slice(-4) : '?';
     try {
-      const result = await geminiModels[i].generateContent('Nói "xin chào", 1 câu ngắn.');
+      const result = await inst.model.generateContent('Nói "xin chào", 1 câu ngắn.');
       const text = result.response.text();
-      results.push({ key: i + 1, keyHint, ok: true, reply: text.slice(0, 100) });
+      results.push({ keyHint, model: inst.modelName, ok: true, reply: text.slice(0, 80) });
+      // One success is enough — don't waste quota testing all
+      break;
     } catch (err) {
-      results.push({ key: i + 1, keyHint, ok: false, error: err.message.slice(0, 200) });
+      results.push({ keyHint, model: inst.modelName, ok: false, error: err.message.slice(0, 150) });
     }
-    // Small delay between key tests to avoid burst
-    if (i < geminiModels.length - 1) await new Promise(r => setTimeout(r, 2000));
+    await new Promise(r => setTimeout(r, 1000));
   }
 
   res.json({
-    totalKeys: geminiModels.length,
-    model: GEMINI_MODEL,
+    totalKeys: apiKeys.length,
+    models: GEMINI_MODELS,
+    totalCombos: geminiInstances.length,
     results,
-    workingKeys: results.filter(r => r.ok).length
+    working: results.some(r => r.ok)
   });
 });
 
