@@ -1605,41 +1605,71 @@ function initImageUpload() {
   fileInput.addEventListener('change', () => {
     const file = fileInput.files[0];
     if (!file) return;
-    if (file.size > 500 * 1024) {
-      alert('Hình ảnh quá lớn! Tối đa 500KB.');
-      fileInput.value = '';
-      return;
-    }
     if (!file.type.startsWith('image/')) {
       alert('Vui lòng chọn file hình ảnh.');
       fileInput.value = '';
       return;
     }
+    if (!selectedUserId && !selectedGroupId) { alert('Vui lòng chọn người nhận trước.'); fileInput.value = ''; return; }
 
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      const dataUrl = ev.target.result;
-      const content = '[image]' + dataUrl;
-      if (!selectedUserId && !selectedGroupId) { alert('Vui lòng chọn người nhận trước.'); return; }
-
-      const tempId = nextTempId--;
-      if (selectedGroupId) {
-        const msg = { id: tempId, sender_id: currentUser.id, group_id: selectedGroupId, sender_name: currentUser.display_name || currentUser.username, content, created_at: new Date().toISOString(), pending: true };
-        appendMessage(msg, true, true);
-        scrollToBottom();
-        pendingMessages.set(tempId, { content, groupId: selectedGroupId });
-        sendPendingMessage(tempId);
-      } else {
-        const msg = { id: tempId, sender_id: currentUser.id, receiver_id: selectedUserId, content, created_at: new Date().toISOString(), pending: true };
-        appendMessage(msg);
-        scrollToBottom();
-        updateUserPreview(selectedUserId, content);
-        pendingMessages.set(tempId, { content, receiverId: selectedUserId });
-        sendPendingMessage(tempId);
-      }
-    };
-    reader.readAsDataURL(file);
+    compressImage(file).then(dataUrl => {
+      pendingImages.push(dataUrl);
+      renderImagePreview();
+      $('#message-input').focus();
+    });
     fileInput.value = '';
+  });
+}
+
+// ---- AUTO COMPRESS IMAGE ----
+function compressImage(file, maxSizeKB = 450, maxDimension = 1200) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      let { width, height } = img;
+
+      // Scale down if too large
+      if (width > maxDimension || height > maxDimension) {
+        const ratio = Math.min(maxDimension / width, maxDimension / height);
+        width = Math.round(width * ratio);
+        height = Math.round(height * ratio);
+      }
+
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0, width, height);
+
+      // Try decreasing quality until under maxSizeKB
+      let quality = 0.8;
+      let dataUrl = canvas.toDataURL('image/jpeg', quality);
+      while (dataUrl.length > maxSizeKB * 1370 && quality > 0.1) {
+        quality -= 0.1;
+        dataUrl = canvas.toDataURL('image/jpeg', quality);
+      }
+
+      // If still too large, scale down more
+      if (dataUrl.length > maxSizeKB * 1370) {
+        const ratio = 0.6;
+        canvas.width = Math.round(width * ratio);
+        canvas.height = Math.round(height * ratio);
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        dataUrl = canvas.toDataURL('image/jpeg', 0.5);
+      }
+
+      resolve(dataUrl);
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      // Fallback: read as-is
+      const reader = new FileReader();
+      reader.onload = (e) => resolve(e.target.result);
+      reader.readAsDataURL(file);
+    };
+    img.src = url;
   });
 }
 
@@ -1673,19 +1703,11 @@ function initClipboardPaste() {
       return;
     }
 
-    if (imageFile.size > 500 * 1024) {
-      alert('Hình ảnh từ clipboard quá lớn! Tối đa 500KB.');
-      return;
-    }
-
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      const dataUrl = ev.target.result;
+    compressImage(imageFile).then(dataUrl => {
       pendingImages.push(dataUrl);
       renderImagePreview();
       messageInput.focus();
-    };
-    reader.readAsDataURL(imageFile);
+    });
   }
 
   // Listen on the input field (Ctrl+V while typing)
