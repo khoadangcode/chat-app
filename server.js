@@ -370,13 +370,16 @@ app.get('/api/bot-test', async (req, res) => {
 
   const results = [];
   for (let i = 0; i < geminiModels.length; i++) {
+    const keyHint = apiKeys[i] ? '...' + apiKeys[i].slice(-4) : '?';
     try {
-      const result = await geminiModels[i].generateContent('Nói "xin chào" bằng tiếng Việt, 1 câu ngắn.');
+      const result = await geminiModels[i].generateContent('Nói "xin chào", 1 câu ngắn.');
       const text = result.response.text();
-      results.push({ key: i + 1, ok: true, reply: text.slice(0, 100) });
+      results.push({ key: i + 1, keyHint, ok: true, reply: text.slice(0, 100) });
     } catch (err) {
-      results.push({ key: i + 1, ok: false, error: err.message.slice(0, 200) });
+      results.push({ key: i + 1, keyHint, ok: false, error: err.message.slice(0, 200) });
     }
+    // Small delay between key tests to avoid burst
+    if (i < geminiModels.length - 1) await new Promise(r => setTimeout(r, 2000));
   }
 
   res.json({
