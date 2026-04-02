@@ -13,6 +13,7 @@ const server = http.createServer(app);
 const io = new Server(server, {
   pingTimeout: 30000,
   pingInterval: 10000,
+  maxHttpBufferSize: 2 * 1024 * 1024, // 2MB for image messages
   transports: ['websocket', 'polling']
 });
 
@@ -290,10 +291,11 @@ async function callGeminiWithRetry(parts) {
   throw lastError;
 }
 
-// --- BOT CONVERSATION (simple text history + queue) ---
-const botConversations = new Map(); // userId -> { messages: [{role, text}], lastActivity }
+// --- BOT CONVERSATION (text history + last image memory) ---
+const botConversations = new Map(); // userId -> { messages, lastActivity, lastImage }
 const BOT_MAX_HISTORY = 20;
 const BOT_HISTORY_TIMEOUT = 30 * 60 * 1000;
+const BOT_IMAGE_TIMEOUT = 10 * 60 * 1000; // remember image for 10 minutes
 const botQueues = new Map();
 
 setInterval(() => {
@@ -316,15 +318,24 @@ function queueBotReply(userId, prompt, imageData) {
 async function getBotReply(userMessage, imageData, userId) {
   if (geminiInstances.length === 0) return 'Xin lỗi, AI Bot chưa được kích hoạt 🔑';
 
-  // Get or create simple conversation
+  // Get or create conversation
   if (!botConversations.has(userId)) {
-    botConversations.set(userId, { messages: [], lastActivity: Date.now() });
+    botConversations.set(userId, { messages: [], lastActivity: Date.now(), lastImage: null, lastImageTime: 0 });
   }
   const conv = botConversations.get(userId);
-  if (Date.now() - conv.lastActivity > BOT_HISTORY_TIMEOUT) conv.messages = [];
+  if (Date.now() - conv.lastActivity > BOT_HISTORY_TIMEOUT) {
+    conv.messages = [];
+    conv.lastImage = null;
+  }
   conv.lastActivity = Date.now();
 
-  // Build context from history — keep only last 6 messages to save tokens
+  // Save new image if provided
+  if (imageData) {
+    conv.lastImage = imageData;
+    conv.lastImageTime = Date.now();
+  }
+
+  // Build context from history
   let contextLines = '';
   const recentMessages = conv.messages.slice(-6);
   if (recentMessages.length > 0) {
@@ -336,13 +347,17 @@ async function getBotReply(userMessage, imageData, userId) {
     contextLines += '---\n';
   }
 
-  const currentText = userMessage || 'Hãy mô tả hình ảnh này.';
+  const currentText = userMessage || 'Hãy mô tả và phân tích hình ảnh này.';
   const fullPrompt = contextLines + 'Người dùng: ' + currentText;
 
   // Build parts for Gemini
   const parts = [{ text: fullPrompt }];
-  if (imageData) {
-    parts.push({ inlineData: { mimeType: imageData.mimeType, data: imageData.base64 } });
+
+  // Attach image: use new image, or re-attach last image if still relevant (within 10 min)
+  const useImage = imageData || (conv.lastImage && (Date.now() - conv.lastImageTime < BOT_IMAGE_TIMEOUT));
+  if (useImage) {
+    const img = imageData || conv.lastImage;
+    parts.push({ inlineData: { mimeType: img.mimeType, data: img.base64 } });
   }
 
   try {

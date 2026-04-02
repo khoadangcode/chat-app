@@ -1622,7 +1622,7 @@ function initImageUpload() {
 }
 
 // ---- AUTO COMPRESS IMAGE ----
-function compressImage(file, maxSizeKB = 450, maxDimension = 1200) {
+function compressImage(file, maxSizeKB = 900, maxDimension = 1600) {
   return new Promise((resolve) => {
     const img = new Image();
     const url = URL.createObjectURL(file);
