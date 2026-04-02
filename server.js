@@ -199,15 +199,18 @@ if (process.env.GEMINI_API_KEY && !apiKeys.includes(process.env.GEMINI_API_KEY))
   apiKeys.push(process.env.GEMINI_API_KEY);
 }
 
+// Use gemini-2.0-flash for higher free tier quota (15 RPM, 1500 RPD)
+const GEMINI_MODEL = 'gemini-2.0-flash';
+
 for (const key of apiKeys) {
   const genAI = new GoogleGenerativeAI(key);
   geminiModels.push(genAI.getGenerativeModel({
-    model: 'gemini-2.5-flash',
+    model: GEMINI_MODEL,
     systemInstruction: BOT_SYSTEM_PROMPT
   }));
 }
 if (geminiModels.length > 0) {
-  console.log(`Gemini AI Bot enabled with ${geminiModels.length} API key(s)`);
+  console.log(`Gemini AI Bot enabled: ${geminiModels.length} key(s), model: ${GEMINI_MODEL}`);
 }
 
 // Get next model (round-robin rotation)
@@ -218,45 +221,56 @@ function getNextModel() {
   return model;
 }
 
-// --- RATE LIMITER (global) ---
-const REQUEST_MIN_INTERVAL = 800; // minimum ms between requests
-let lastRequestTime = 0;
+// --- RATE LIMITER (per-key) ---
+const keyLastUsed = new Map(); // keyIndex -> timestamp
+const KEY_MIN_INTERVAL = 400; // minimum ms between requests per key
 
-async function waitForRateLimit() {
-  const now = Date.now();
-  const elapsed = now - lastRequestTime;
-  if (elapsed < REQUEST_MIN_INTERVAL) {
-    await new Promise(r => setTimeout(r, REQUEST_MIN_INTERVAL - elapsed));
+async function waitForKey(keyIndex) {
+  const last = keyLastUsed.get(keyIndex) || 0;
+  const elapsed = Date.now() - last;
+  if (elapsed < KEY_MIN_INTERVAL) {
+    await new Promise(r => setTimeout(r, KEY_MIN_INTERVAL - elapsed));
   }
-  lastRequestTime = Date.now();
+  keyLastUsed.set(keyIndex, Date.now());
 }
 
-// --- RETRY WITH BACKOFF ---
-async function callGeminiWithRetry(parts, maxRetries = 3) {
+// --- RETRY WITH BACKOFF (try ALL keys before waiting) ---
+async function callGeminiWithRetry(parts, maxRounds = 3) {
+  if (geminiModels.length === 0) throw new Error('No API keys configured');
   let lastError;
-  for (let attempt = 0; attempt < maxRetries; attempt++) {
-    const model = getNextModel();
-    if (!model) throw new Error('No API keys configured');
 
-    await waitForRateLimit();
+  for (let round = 0; round < maxRounds; round++) {
+    // Try each key in this round
+    for (let i = 0; i < geminiModels.length; i++) {
+      const keyIndex = (currentModelIndex + i) % geminiModels.length;
+      const model = geminiModels[keyIndex];
 
-    try {
-      const result = await model.generateContent(parts);
-      return result;
-    } catch (err) {
-      lastError = err;
-      const is429 = err.message && (err.message.includes('429') || err.message.includes('RESOURCE_EXHAUSTED'));
-      const isOverloaded = err.message && err.message.includes('503');
+      await waitForKey(keyIndex);
 
-      if (is429 || isOverloaded) {
-        // Exponential backoff: 2s, 6s, 18s
-        const delay = Math.min(2000 * Math.pow(3, attempt), 30000);
-        console.log(`Gemini rate limited (attempt ${attempt + 1}/${maxRetries}), retrying in ${delay}ms...`);
-        await new Promise(r => setTimeout(r, delay));
-        continue;
+      try {
+        const result = await model.generateContent(parts);
+        // Success — advance the round-robin pointer past this key
+        currentModelIndex = (keyIndex + 1) % geminiModels.length;
+        return result;
+      } catch (err) {
+        lastError = err;
+        const is429 = err.message && (err.message.includes('429') || err.message.includes('RESOURCE_EXHAUSTED'));
+        const isOverloaded = err.message && err.message.includes('503');
+
+        if (is429 || isOverloaded) {
+          console.log(`Key ${keyIndex + 1}/${geminiModels.length} rate limited, trying next...`);
+          continue; // try next key immediately
+        }
+        // Non-retryable error
+        throw err;
       }
-      // Non-retryable error
-      throw err;
+    }
+
+    // All keys failed this round — wait before next round
+    if (round < maxRounds - 1) {
+      const delay = Math.min(8000 * Math.pow(2, round), 30000); // 8s, 16s
+      console.log(`All keys rate limited (round ${round + 1}/${maxRounds}), waiting ${delay}ms...`);
+      await new Promise(r => setTimeout(r, delay));
     }
   }
   throw lastError;
