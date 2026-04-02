@@ -15,6 +15,18 @@ let allUsers = [];
 let lastSeenData = {};
 let replyingTo = null; // { id, senderName, content }
 
+// Voice recording state
+let mediaRecorder = null;
+let voiceChunks = [];
+let voiceRecording = false;
+let voiceRecordTimer = null;
+
+// Pinned messages
+let pinnedMessages = [];
+
+// Online count
+let onlineCount = 0;
+
 // Message queue for offline/pending messages
 const pendingMessages = new Map();
 let nextTempId = -1;
@@ -472,6 +484,11 @@ function connectSocket() {
     onlineUserIds = ids;
     updateUserListOnlineStatus();
     updateChatHeaderStatus();
+    updateOnlineCount(ids.length);
+  });
+
+  socket.on('online_count', (count) => {
+    updateOnlineCount(count);
   });
 
   socket.on('new_message', (msg) => {
@@ -773,6 +790,7 @@ function updateUserPreview(userId, text) {
     if (text && text.startsWith('[image]')) el.textContent = '📷 Hình ảnh';
     else if (text && text.startsWith('[file]')) el.textContent = '📎 Tệp đính kèm';
     else if (text && text.startsWith('[sticker]')) el.textContent = '🎃 Sticker';
+    else if (text && text.startsWith('[voice]')) el.textContent = '🎤 Tin nhắn thoại';
     else el.textContent = (text || '').slice(0, 40);
   }
 }
@@ -806,6 +824,8 @@ async function selectUser(userId, username) {
     $('.sidebar').classList.add('sidebar-hidden');
     $('.chat-area').classList.add('chat-visible');
   }
+
+  loadPinnedFromLocal();
 
   $('#messages').innerHTML = '';
   try {
@@ -918,6 +938,7 @@ function createMessageEl(msg, animate = true, isGroupMsg = false) {
   const isSticker = msg.content && msg.content.startsWith('[sticker]');
   const isImage = msg.content && msg.content.startsWith('[image]');
   const isFile = msg.content && msg.content.startsWith('[file]');
+  const isVoice = msg.content && msg.content.startsWith('[voice]');
   const isDeleted = msg.is_deleted;
   const isEdited = msg.is_edited;
 
@@ -927,6 +948,7 @@ function createMessageEl(msg, animate = true, isGroupMsg = false) {
     + (isSticker ? ' sticker-message' : '')
     + (isImage ? ' image-message' : '')
     + (isFile ? ' file-message' : '')
+    + (isVoice ? ' voice-message' : '')
     + (isDeleted ? ' deleted' : '');
   el.dataset.msgId = msg.id;
   if (!animate) el.style.animation = 'none';
@@ -959,6 +981,9 @@ function createMessageEl(msg, animate = true, isGroupMsg = false) {
     const fName = msg.file_name || 'file';
     const fIcon = getFileIcon(fName);
     el.innerHTML = `${senderLabel}${replyHtml}<div class="file-attachment"><span class="file-icon">${fIcon}</span><a href="${dataUrl}" download="${escapeHtml(fName)}" class="file-link">${escapeHtml(fName)}</a></div><span class="time">${editedBadge}${formatTime(msg.created_at)}${status}</span>`;
+  } else if (isVoice) {
+    const dataUrl = msg.content.substring(7);
+    el.innerHTML = `${senderLabel}${replyHtml}<div class="voice-msg"><span class="voice-icon">🎤</span><audio controls src="${dataUrl}" preload="metadata"></audio></div><span class="time">${editedBadge}${formatTime(msg.created_at)}${status}</span>`;
   } else if (isImage) {
     const dataUrl = msg.content.substring(7);
     el.innerHTML = `${senderLabel}${replyHtml}<img src="${dataUrl}" class="chat-image" alt="Hình ảnh" onclick="openImagePreview(this.src)" /><span class="time">${editedBadge}${formatTime(msg.created_at)}${status}</span>`;
@@ -984,6 +1009,17 @@ function createMessageEl(msg, animate = true, isGroupMsg = false) {
       setReply(msg);
     });
     actionsDiv.appendChild(replyBtn);
+
+    // Pin button
+    const pinBtn = document.createElement('button');
+    pinBtn.className = 'msg-action-btn';
+    pinBtn.title = 'Ghim tin nhắn';
+    pinBtn.innerHTML = '📌';
+    pinBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      pinMessage(msg);
+    });
+    actionsDiv.appendChild(pinBtn);
 
     if (isSent && !isSticker && !isImage && !isFile) {
       // Edit button
@@ -1454,7 +1490,9 @@ $('#message-form').addEventListener('submit', (e) => {
   e.preventDefault();
   const input = $('#message-input');
   const content = input.value.trim();
-  if (!content || (!selectedUserId && !selectedGroupId)) return;
+  const hasImages = pendingImages.length > 0;
+  if (!content && !hasImages) return;
+  if (!selectedUserId && !selectedGroupId) return;
 
   emojiPickerOpen = false;
   const picker = $('#emoji-picker');
@@ -1462,52 +1500,58 @@ $('#message-form').addEventListener('submit', (e) => {
   const suggest = $('#emoji-suggest');
   if (suggest) hideEmojiSuggest(suggest);
 
-  const tempId = nextTempId--;
-  const replyTo = replyingTo ? replyingTo.id : null;
-  const replyContent = replyingTo ? replyingTo.content : null;
-  const replySenderName = replyingTo ? replyingTo.senderName : null;
-
-  if (selectedGroupId) {
-    const msg = {
-      id: tempId,
-      sender_id: currentUser.id,
-      group_id: selectedGroupId,
-      sender_name: currentUser.display_name || currentUser.username,
-      content,
-      created_at: new Date().toISOString(),
-      pending: true,
-      reply_to: replyTo,
-      reply_content: replyContent,
-      reply_sender_name: replySenderName
-    };
-    appendMessage(msg, true, true);
-    scrollToBottom();
-    pendingMessages.set(tempId, { content, groupId: selectedGroupId, replyTo });
-    input.value = '';
-    input.focus();
-    clearReply();
-    sendPendingMessage(tempId);
-  } else {
-    const msg = {
-      id: tempId,
-      sender_id: currentUser.id,
-      receiver_id: selectedUserId,
-      content,
-      created_at: new Date().toISOString(),
-      pending: true,
-      reply_to: replyTo,
-      reply_content: replyContent,
-      reply_sender_name: replySenderName
-    };
-    appendMessage(msg);
-    scrollToBottom();
-    updateUserPreview(selectedUserId, content);
-    pendingMessages.set(tempId, { content, receiverId: selectedUserId, replyTo });
-    input.value = '';
-    input.focus();
-    clearReply();
-    sendPendingMessage(tempId);
+  // Send pending images first
+  if (hasImages) {
+    sendPendingImages();
   }
+
+  // Then send text message if any
+  if (content) {
+    const tempId = nextTempId--;
+    const replyTo = replyingTo ? replyingTo.id : null;
+    const replyContent = replyingTo ? replyingTo.content : null;
+    const replySenderName = replyingTo ? replyingTo.senderName : null;
+
+    if (selectedGroupId) {
+      const msg = {
+        id: tempId,
+        sender_id: currentUser.id,
+        group_id: selectedGroupId,
+        sender_name: currentUser.display_name || currentUser.username,
+        content,
+        created_at: new Date().toISOString(),
+        pending: true,
+        reply_to: replyTo,
+        reply_content: replyContent,
+        reply_sender_name: replySenderName
+      };
+      appendMessage(msg, true, true);
+      scrollToBottom();
+      pendingMessages.set(tempId, { content, groupId: selectedGroupId, replyTo });
+      sendPendingMessage(tempId);
+    } else {
+      const msg = {
+        id: tempId,
+        sender_id: currentUser.id,
+        receiver_id: selectedUserId,
+        content,
+        created_at: new Date().toISOString(),
+        pending: true,
+        reply_to: replyTo,
+        reply_content: replyContent,
+        reply_sender_name: replySenderName
+      };
+      appendMessage(msg);
+      scrollToBottom();
+      updateUserPreview(selectedUserId, content);
+      pendingMessages.set(tempId, { content, receiverId: selectedUserId, replyTo });
+      sendPendingMessage(tempId);
+    }
+  }
+
+  input.value = '';
+  input.focus();
+  clearReply();
 });
 
 // Typing indicator
@@ -1599,7 +1643,9 @@ function initImageUpload() {
   });
 }
 
-// ---- CLIPBOARD PASTE IMAGE ----
+// ---- CLIPBOARD PASTE IMAGE (with preview, multi-image support) ----
+
+let pendingImages = []; // Array of dataUrl strings waiting to be sent
 
 function initClipboardPaste() {
   const chatBox = $('#chat-box');
@@ -1632,29 +1678,12 @@ function initClipboardPaste() {
       return;
     }
 
-    // Show a brief toast so the user knows the image was captured
-    showPasteToast(imageFile.name || 'clipboard-image');
-
     const reader = new FileReader();
     reader.onload = (ev) => {
       const dataUrl = ev.target.result;
-      const content = '[image]' + dataUrl;
-
-      const tempId = nextTempId--;
-      if (selectedGroupId) {
-        const msg = { id: tempId, sender_id: currentUser.id, group_id: selectedGroupId, sender_name: currentUser.display_name || currentUser.username, content, created_at: new Date().toISOString(), pending: true };
-        appendMessage(msg, true, true);
-        scrollToBottom();
-        pendingMessages.set(tempId, { content, groupId: selectedGroupId });
-        sendPendingMessage(tempId);
-      } else {
-        const msg = { id: tempId, sender_id: currentUser.id, receiver_id: selectedUserId, content, created_at: new Date().toISOString(), pending: true };
-        appendMessage(msg);
-        scrollToBottom();
-        updateUserPreview(selectedUserId, content);
-        pendingMessages.set(tempId, { content, receiverId: selectedUserId });
-        sendPendingMessage(tempId);
-      }
+      pendingImages.push(dataUrl);
+      renderImagePreview();
+      messageInput.focus();
     };
     reader.readAsDataURL(imageFile);
   }
@@ -1669,6 +1698,63 @@ function initClipboardPaste() {
     if (e.target === messageInput) return;
     handlePasteImage(e);
   });
+}
+
+function renderImagePreview() {
+  let container = $('#image-preview-bar');
+  if (!container) {
+    container = document.createElement('div');
+    container.id = 'image-preview-bar';
+    const form = $('#message-form');
+    form.parentNode.insertBefore(container, form);
+  }
+
+  container.innerHTML = '';
+  if (pendingImages.length === 0) {
+    container.remove();
+    return;
+  }
+
+  pendingImages.forEach((dataUrl, idx) => {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'image-preview-item';
+    wrapper.innerHTML = `<img src="${dataUrl}" alt="Preview" /><button class="image-preview-remove" data-idx="${idx}" title="Xóa ảnh">✕</button>`;
+    container.appendChild(wrapper);
+  });
+
+  // Remove button handlers
+  container.querySelectorAll('.image-preview-remove').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      const idx = parseInt(e.target.dataset.idx);
+      pendingImages.splice(idx, 1);
+      renderImagePreview();
+    });
+  });
+}
+
+function sendPendingImages() {
+  const images = [...pendingImages];
+  pendingImages = [];
+  renderImagePreview();
+
+  for (const dataUrl of images) {
+    const content = '[image]' + dataUrl;
+    const tempId = nextTempId--;
+    if (selectedGroupId) {
+      const msg = { id: tempId, sender_id: currentUser.id, group_id: selectedGroupId, sender_name: currentUser.display_name || currentUser.username, content, created_at: new Date().toISOString(), pending: true };
+      appendMessage(msg, true, true);
+      scrollToBottom();
+      pendingMessages.set(tempId, { content, groupId: selectedGroupId });
+      sendPendingMessage(tempId);
+    } else {
+      const msg = { id: tempId, sender_id: currentUser.id, receiver_id: selectedUserId, content, created_at: new Date().toISOString(), pending: true };
+      appendMessage(msg);
+      scrollToBottom();
+      updateUserPreview(selectedUserId, content);
+      pendingMessages.set(tempId, { content, receiverId: selectedUserId });
+      sendPendingMessage(tempId);
+    }
+  }
 }
 
 function showPasteToast(fileName) {
@@ -2103,6 +2189,8 @@ async function selectGroup(groupId, name) {
     $('.chat-area').classList.add('chat-visible');
   }
 
+  loadPinnedFromLocal();
+
   $('#messages').innerHTML = '';
 
   try {
@@ -2209,6 +2297,16 @@ $('#admin-close-btn').addEventListener('click', () => {
   $('#admin-panel').classList.add('hidden');
 });
 
+$('#admin-refresh-btn')?.addEventListener('click', () => {
+  loadAdminStats();
+  loadAdminUsers();
+  const btn = $('#admin-refresh-btn');
+  if (btn) {
+    btn.classList.add('spinning');
+    setTimeout(() => btn.classList.remove('spinning'), 600);
+  }
+});
+
 async function loadAdminStats() {
   try {
     const res = await authFetch('/api/admin/stats');
@@ -2236,7 +2334,44 @@ async function loadAdminUsers() {
   }
 }
 
+let allAdminUsers = [];
+
 function renderAdminUsers(users) {
+  allAdminUsers = users || [];
+  const tbody = $('#admin-users-tbody');
+  const noUsers = $('#admin-no-users');
+
+  // Init search filter if not done
+  let searchInput = $('#admin-user-search');
+  if (!searchInput) {
+    const wrap = $('.admin-table-wrap');
+    if (wrap) {
+      const searchDiv = document.createElement('div');
+      searchDiv.className = 'admin-search-bar';
+      searchDiv.innerHTML = '<input type="text" id="admin-user-search" placeholder="Tìm kiếm người dùng..." />';
+      const h3 = wrap.querySelector('h3');
+      if (h3) h3.after(searchDiv);
+      searchInput = searchDiv.querySelector('#admin-user-search');
+      searchInput.addEventListener('input', () => {
+        filterAdminUsers(searchInput.value.trim().toLowerCase());
+      });
+    }
+  }
+
+  renderAdminUserRows(users);
+}
+
+function filterAdminUsers(query) {
+  if (!query) { renderAdminUserRows(allAdminUsers); return; }
+  const filtered = allAdminUsers.filter(u =>
+    u.username.toLowerCase().includes(query) ||
+    (u.display_name || '').toLowerCase().includes(query) ||
+    (u.role || '').toLowerCase().includes(query)
+  );
+  renderAdminUserRows(filtered);
+}
+
+function renderAdminUserRows(users) {
   const tbody = $('#admin-users-tbody');
   const noUsers = $('#admin-no-users');
 
@@ -2272,7 +2407,8 @@ function renderAdminUsers(users) {
       actions = '<span class="admin-self-label">Bạn</span>';
     }
 
-    tr.innerHTML = `<td>${escapeHtml(user.username)}</td><td>${roleBadge}</td><td>${statusBadge}</td><td>${user.message_count || 0}</td><td class="admin-actions">${actions}</td>`;
+    const displayName = user.display_name || user.username;
+    tr.innerHTML = `<td>${escapeHtml(user.username)}</td><td>${escapeHtml(displayName)}</td><td>${roleBadge}</td><td>${statusBadge}</td><td>${user.message_count || 0}</td><td class="admin-actions">${actions}</td>`;
     tbody.appendChild(tr);
 
     if (!isSelf) {
@@ -2385,16 +2521,361 @@ function initMobile() {
   }
 }
 
+// ---- VOICE RECORDING ----
+
+function initVoiceRecording() {
+  const form = $('#message-form');
+  const fileBtn = $('#file-btn');
+  if (!form) return;
+
+  const voiceBtn = document.createElement('button');
+  voiceBtn.type = 'button';
+  voiceBtn.id = 'voice-btn';
+  voiceBtn.className = 'emoji-btn voice-btn';
+  voiceBtn.title = 'Tin nhắn thoại';
+  voiceBtn.textContent = '🎤';
+  voiceBtn.style.cssText = 'margin-left:0;';
+
+  const insertAfter = fileBtn || $('#image-btn') || $('#emoji-btn');
+  if (insertAfter) insertAfter.parentNode.insertBefore(voiceBtn, insertAfter.nextSibling);
+
+  voiceBtn.addEventListener('click', async () => {
+    if (voiceRecording) {
+      stopVoiceRecording();
+    } else {
+      await startVoiceRecording();
+    }
+  });
+}
+
+async function startVoiceRecording() {
+  if (!selectedUserId && !selectedGroupId) { alert('Vui lòng chọn người nhận trước.'); return; }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    mediaRecorder = new MediaRecorder(stream);
+    voiceChunks = [];
+    voiceRecording = true;
+
+    const voiceBtn = $('#voice-btn');
+    if (voiceBtn) voiceBtn.classList.add('recording');
+
+    mediaRecorder.ondataavailable = (e) => {
+      if (e.data.size > 0) voiceChunks.push(e.data);
+    };
+
+    mediaRecorder.onstop = () => {
+      stream.getTracks().forEach(t => t.stop());
+      voiceRecording = false;
+      const voiceBtn = $('#voice-btn');
+      if (voiceBtn) voiceBtn.classList.remove('recording');
+      clearTimeout(voiceRecordTimer);
+
+      const blob = new Blob(voiceChunks, { type: 'audio/webm' });
+      if (blob.size < 500) return; // too short, ignore
+
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        const dataUrl = ev.target.result;
+        const content = '[voice]' + dataUrl;
+        const tempId = nextTempId--;
+
+        if (selectedGroupId) {
+          const msg = { id: tempId, sender_id: currentUser.id, group_id: selectedGroupId, sender_name: currentUser.display_name || currentUser.username, content, created_at: new Date().toISOString(), pending: true };
+          appendMessage(msg, true, true);
+          scrollToBottom();
+          pendingMessages.set(tempId, { content, groupId: selectedGroupId });
+          sendPendingMessage(tempId);
+        } else {
+          const msg = { id: tempId, sender_id: currentUser.id, receiver_id: selectedUserId, content, created_at: new Date().toISOString(), pending: true };
+          appendMessage(msg);
+          scrollToBottom();
+          updateUserPreview(selectedUserId, content);
+          pendingMessages.set(tempId, { content, receiverId: selectedUserId });
+          sendPendingMessage(tempId);
+        }
+      };
+      reader.readAsDataURL(blob);
+    };
+
+    mediaRecorder.start();
+    // Auto-stop after 60 seconds
+    voiceRecordTimer = setTimeout(() => {
+      if (voiceRecording) stopVoiceRecording();
+    }, 60000);
+  } catch (err) {
+    alert('Không thể truy cập micro. Vui lòng cấp quyền.');
+    voiceRecording = false;
+  }
+}
+
+function stopVoiceRecording() {
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    mediaRecorder.stop();
+  }
+}
+
+// ---- PIN MESSAGES ----
+
+async function pinMessage(msg) {
+  try {
+    const res = await authFetch('/api/pin', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        messageId: msg.id,
+        content: msg.content,
+        senderName: msg.sender_display_name || msg.sender_name || (msg.sender_id === currentUser.id ? (currentUser.display_name || currentUser.username) : 'User'),
+        chatUserId: selectedUserId,
+        groupId: selectedGroupId
+      })
+    });
+    if (res.ok) {
+      const pinned = { id: msg.id, content: msg.content, senderName: msg.sender_display_name || msg.sender_name || 'User' };
+      if (!pinnedMessages.find(p => p.id === pinned.id)) {
+        pinnedMessages.push(pinned);
+      }
+      renderPinnedBar();
+    }
+  } catch (err) {
+    // If backend doesn't have /api/pin, store locally
+    const pinned = { id: msg.id, content: msg.content, senderName: msg.sender_display_name || msg.sender_name || 'User' };
+    if (!pinnedMessages.find(p => p.id === pinned.id)) {
+      pinnedMessages.push(pinned);
+    }
+    savePinnedToLocal();
+    renderPinnedBar();
+  }
+}
+
+function unpinMessage(msgId) {
+  pinnedMessages = pinnedMessages.filter(p => p.id !== msgId);
+  savePinnedToLocal();
+  renderPinnedBar();
+}
+
+function savePinnedToLocal() {
+  const key = selectedGroupId ? `pinned_group_${selectedGroupId}` : `pinned_user_${selectedUserId}`;
+  localStorage.setItem(key, JSON.stringify(pinnedMessages));
+}
+
+function loadPinnedFromLocal() {
+  const key = selectedGroupId ? `pinned_group_${selectedGroupId}` : `pinned_user_${selectedUserId}`;
+  try {
+    pinnedMessages = JSON.parse(localStorage.getItem(key)) || [];
+  } catch { pinnedMessages = []; }
+  renderPinnedBar();
+}
+
+function renderPinnedBar() {
+  let bar = $('#pinned-bar');
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.id = 'pinned-bar';
+    bar.className = 'pinned-bar hidden';
+    const chatHeader = $('.chat-header');
+    if (chatHeader) chatHeader.parentNode.insertBefore(bar, chatHeader.nextSibling);
+  }
+
+  if (pinnedMessages.length === 0) {
+    bar.classList.add('hidden');
+    bar.innerHTML = '';
+    return;
+  }
+
+  bar.classList.remove('hidden');
+  bar.innerHTML = '';
+
+  pinnedMessages.forEach(pin => {
+    const item = document.createElement('div');
+    item.className = 'pinned-item';
+    let preview = pin.content;
+    if (preview.startsWith('[image]')) preview = '📷 Hình ảnh';
+    else if (preview.startsWith('[file]')) preview = '📎 Tệp';
+    else if (preview.startsWith('[voice]')) preview = '🎤 Tin nhắn thoại';
+    else if (preview.startsWith('[sticker]')) preview = '🎃 Sticker';
+    else preview = preview.slice(0, 50);
+
+    item.innerHTML = `<span class="pinned-icon">📌</span><span class="pinned-text" data-pin-msg-id="${pin.id}">${escapeHtml(pin.senderName)}: ${escapeHtml(preview)}</span><button class="pinned-remove" title="Bỏ ghim">✕</button>`;
+
+    item.querySelector('.pinned-text').addEventListener('click', () => {
+      const el = document.querySelector(`[data-msg-id="${pin.id}"]`);
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        el.classList.add('highlight');
+        setTimeout(() => el.classList.remove('highlight'), 2000);
+      }
+    });
+
+    item.querySelector('.pinned-remove').addEventListener('click', (e) => {
+      e.stopPropagation();
+      unpinMessage(pin.id);
+    });
+
+    bar.appendChild(item);
+  });
+}
+
+// ---- CUSTOM THEME (Color Picker) ----
+
+function initColorPicker() {
+  const sidebarActions = $('.sidebar-header-actions');
+  if (!sidebarActions) return;
+
+  const colorBtn = document.createElement('button');
+  colorBtn.id = 'color-picker-btn';
+  colorBtn.className = 'icon-btn';
+  colorBtn.title = 'Đổi màu nền chat';
+  colorBtn.textContent = '🎨';
+  colorBtn.style.fontSize = '18px';
+
+  // Insert before the theme toggle
+  const themeToggle = $('#theme-toggle');
+  if (themeToggle) sidebarActions.insertBefore(colorBtn, themeToggle);
+  else sidebarActions.appendChild(colorBtn);
+
+  const CHAT_COLORS = [
+    { name: 'Mặc định', value: '' },
+    { name: 'Hoàng hôn', value: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)' },
+    { name: 'Đại dương', value: 'linear-gradient(135deg, #0093E9 0%, #80D0C7 100%)' },
+    { name: 'Hồng pastel', value: 'linear-gradient(135deg, #FFDEE9 0%, #B5FFFC 100%)' },
+    { name: 'Rừng xanh', value: 'linear-gradient(135deg, #11998e 0%, #38ef7d 100%)' },
+    { name: 'Lửa cam', value: 'linear-gradient(135deg, #f093fb 0%, #f5576c 100%)' },
+    { name: 'Tím galaxy', value: 'linear-gradient(135deg, #4facfe 0%, #00f2fe 100%)' },
+    { name: 'Nắng vàng', value: 'linear-gradient(135deg, #f6d365 0%, #fda085 100%)' },
+    { name: 'Bạc hà', value: 'linear-gradient(135deg, #a8edea 0%, #fed6e3 100%)' },
+    { name: 'Đêm tối', value: 'linear-gradient(135deg, #0c0c1d 0%, #1a1a3e 50%, #2d2d6e 100%)' }
+  ];
+
+  const SENT_COLORS = [
+    { name: 'Mặc định', value: '' },
+    { name: 'Tím đậm', value: '#7c3aed' },
+    { name: 'Xanh dương', value: '#2563eb' },
+    { name: 'Xanh lá', value: '#059669' },
+    { name: 'Hồng', value: '#e11d48' },
+    { name: 'Cam', value: '#ea580c' },
+    { name: 'Xám', value: '#475569' },
+    { name: 'Đen', value: '#18181b' }
+  ];
+
+  colorBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    let popup = $('#color-picker-popup');
+    if (popup) { popup.remove(); return; }
+
+    popup = document.createElement('div');
+    popup.id = 'color-picker-popup';
+    popup.className = 'color-picker-popup';
+
+    // Chat background section
+    let bgHtml = '<div class="color-picker-section"><div class="color-picker-label">Nền chat</div><div class="color-picker-grid">';
+    CHAT_COLORS.forEach((c, i) => {
+      const style = c.value ? `background:${c.value}` : 'background:var(--chat-bg);border:2px dashed var(--border)';
+      bgHtml += `<button class="color-swatch" data-bg-idx="${i}" title="${c.name}" style="${style}"></button>`;
+    });
+    bgHtml += '</div></div>';
+
+    // Sent message color section
+    let sentHtml = '<div class="color-picker-section"><div class="color-picker-label">Tin nhắn gửi</div><div class="color-picker-grid">';
+    SENT_COLORS.forEach((c, i) => {
+      const style = c.value ? `background:${c.value}` : 'background:var(--sent);border:2px dashed var(--border)';
+      sentHtml += `<button class="color-swatch" data-sent-idx="${i}" title="${c.name}" style="${style}"></button>`;
+    });
+    sentHtml += '</div></div>';
+
+    popup.innerHTML = bgHtml + sentHtml;
+    colorBtn.parentNode.appendChild(popup);
+
+    popup.querySelectorAll('[data-bg-idx]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const idx = parseInt(btn.dataset.bgIdx);
+        const val = CHAT_COLORS[idx].value;
+        localStorage.setItem('chatBgColor', val);
+        applyChatBg(val);
+        popup.remove();
+      });
+    });
+
+    popup.querySelectorAll('[data-sent-idx]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const idx = parseInt(btn.dataset.sentIdx);
+        const val = SENT_COLORS[idx].value;
+        localStorage.setItem('chatSentColor', val);
+        applySentColor(val);
+        popup.remove();
+      });
+    });
+
+    const closeHandler = (ev) => {
+      if (!popup.contains(ev.target) && ev.target !== colorBtn) {
+        popup.remove();
+        document.removeEventListener('click', closeHandler);
+      }
+    };
+    setTimeout(() => document.addEventListener('click', closeHandler), 0);
+  });
+
+  // Apply saved colors on init
+  const savedBg = localStorage.getItem('chatBgColor');
+  if (savedBg) applyChatBg(savedBg);
+  const savedSent = localStorage.getItem('chatSentColor');
+  if (savedSent) applySentColor(savedSent);
+}
+
+function applyChatBg(val) {
+  const chatArea = $('.chat-area');
+  const messagesEl = $('#messages');
+  if (val) {
+    if (chatArea) chatArea.style.background = val;
+    if (messagesEl) messagesEl.style.background = 'transparent';
+  } else {
+    if (chatArea) chatArea.style.background = '';
+    if (messagesEl) messagesEl.style.background = '';
+  }
+}
+
+function applySentColor(val) {
+  if (val) {
+    document.documentElement.style.setProperty('--sent', val);
+  } else {
+    document.documentElement.style.removeProperty('--sent');
+  }
+}
+
+// ---- ONLINE COUNT ----
+
+function initOnlineCount() {
+  const currentUserEl = $('.current-user');
+  if (!currentUserEl) return;
+
+  let badge = $('#online-count-badge');
+  if (!badge) {
+    badge = document.createElement('span');
+    badge.id = 'online-count-badge';
+    badge.className = 'online-count-badge';
+    badge.textContent = '0 online';
+    currentUserEl.appendChild(badge);
+  }
+}
+
+function updateOnlineCount(count) {
+  onlineCount = count;
+  const badge = $('#online-count-badge');
+  if (badge) badge.textContent = count + ' online';
+}
+
 // ---- INIT ----
 
 initEmojiPicker();
 initEmojiSuggest();
 initImageUpload();
 initFileUpload();
+initVoiceRecording();
 initClipboardPaste();
 initInfiniteScroll();
 initMessageSearch();
 initProfile();
+initColorPicker();
+initOnlineCount();
 setInterval(loadUsers, 10000);
 checkAuth();
 initMobile();

@@ -122,6 +122,18 @@ async function initDB() {
   await pool.query(`ALTER TABLE group_messages ADD COLUMN IF NOT EXISTS file_name TEXT`);
   await pool.query(`ALTER TABLE group_messages ADD COLUMN IF NOT EXISTS file_type TEXT`);
 
+  // --- NEW: Pinned messages ---
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS pinned_messages (
+      id SERIAL PRIMARY KEY,
+      message_id INTEGER NOT NULL,
+      chat_type TEXT NOT NULL,
+      chat_id TEXT NOT NULL,
+      pinned_by INTEGER NOT NULL REFERENCES users(id),
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+
   // Promote first user to admin if none exists
   const { rows: admins } = await pool.query("SELECT id FROM users WHERE role = 'admin' LIMIT 1");
   if (admins.length === 0) {
@@ -152,7 +164,8 @@ async function initDB() {
 const BOT_USERNAME = 'AI Bot';
 let BOT_ID;
 
-let geminiModel = null;
+let geminiModels = []; // Array of models from multiple API keys
+let currentModelIndex = 0;
 const BOT_SYSTEM_PROMPT = `Bạn là "AI Bot", một chatbot thân thiện và thông minh trong app nhắn tin. Quy tắc:
 - Trả lời bằng tiếng Việt, ngắn gọn nhưng đầy đủ
 - Vui vẻ, dùng emoji phù hợp
@@ -176,13 +189,77 @@ const BOT_SYSTEM_PROMPT = `Bạn là "AI Bot", một chatbot thân thiện và t
 - Nếu không biết thì nói thẳng
 - Không bao giờ giả vờ là người thật`;
 
-if (process.env.GEMINI_API_KEY) {
-  const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-  geminiModel = genAI.getGenerativeModel({
+// --- MULTI-KEY ROTATION ---
+// Support: GEMINI_API_KEY=key1 (single) or GEMINI_API_KEYS=key1,key2,key3 (multiple)
+const apiKeys = [];
+if (process.env.GEMINI_API_KEYS) {
+  apiKeys.push(...process.env.GEMINI_API_KEYS.split(',').map(k => k.trim()).filter(Boolean));
+}
+if (process.env.GEMINI_API_KEY && !apiKeys.includes(process.env.GEMINI_API_KEY)) {
+  apiKeys.push(process.env.GEMINI_API_KEY);
+}
+
+for (const key of apiKeys) {
+  const genAI = new GoogleGenerativeAI(key);
+  geminiModels.push(genAI.getGenerativeModel({
     model: 'gemini-2.5-flash',
     systemInstruction: BOT_SYSTEM_PROMPT
-  });
-  console.log('Gemini AI Bot enabled');
+  }));
+}
+if (geminiModels.length > 0) {
+  console.log(`Gemini AI Bot enabled with ${geminiModels.length} API key(s)`);
+}
+
+// Get next model (round-robin rotation)
+function getNextModel() {
+  if (geminiModels.length === 0) return null;
+  const model = geminiModels[currentModelIndex];
+  currentModelIndex = (currentModelIndex + 1) % geminiModels.length;
+  return model;
+}
+
+// --- RATE LIMITER (global) ---
+const REQUEST_MIN_INTERVAL = 800; // minimum ms between requests
+let lastRequestTime = 0;
+
+async function waitForRateLimit() {
+  const now = Date.now();
+  const elapsed = now - lastRequestTime;
+  if (elapsed < REQUEST_MIN_INTERVAL) {
+    await new Promise(r => setTimeout(r, REQUEST_MIN_INTERVAL - elapsed));
+  }
+  lastRequestTime = Date.now();
+}
+
+// --- RETRY WITH BACKOFF ---
+async function callGeminiWithRetry(parts, maxRetries = 3) {
+  let lastError;
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    const model = getNextModel();
+    if (!model) throw new Error('No API keys configured');
+
+    await waitForRateLimit();
+
+    try {
+      const result = await model.generateContent(parts);
+      return result;
+    } catch (err) {
+      lastError = err;
+      const is429 = err.message && (err.message.includes('429') || err.message.includes('RESOURCE_EXHAUSTED'));
+      const isOverloaded = err.message && err.message.includes('503');
+
+      if (is429 || isOverloaded) {
+        // Exponential backoff: 2s, 6s, 18s
+        const delay = Math.min(2000 * Math.pow(3, attempt), 30000);
+        console.log(`Gemini rate limited (attempt ${attempt + 1}/${maxRetries}), retrying in ${delay}ms...`);
+        await new Promise(r => setTimeout(r, delay));
+        continue;
+      }
+      // Non-retryable error
+      throw err;
+    }
+  }
+  throw lastError;
 }
 
 // --- BOT CONVERSATION (simple text history + queue) ---
@@ -209,7 +286,7 @@ function queueBotReply(userId, prompt, imageData) {
 }
 
 async function getBotReply(userMessage, imageData, userId) {
-  if (!geminiModel) return 'Xin lỗi, AI Bot chưa được kích hoạt 🔑';
+  if (geminiModels.length === 0) return 'Xin lỗi, AI Bot chưa được kích hoạt 🔑';
 
   // Get or create simple conversation
   if (!botConversations.has(userId)) {
@@ -219,12 +296,15 @@ async function getBotReply(userMessage, imageData, userId) {
   if (Date.now() - conv.lastActivity > BOT_HISTORY_TIMEOUT) conv.messages = [];
   conv.lastActivity = Date.now();
 
-  // Build context from history as plain text
+  // Build context from history — keep only last 10 messages to save tokens
   let contextLines = '';
-  if (conv.messages.length > 0) {
+  const recentMessages = conv.messages.slice(-10);
+  if (recentMessages.length > 0) {
     contextLines = 'Lịch sử cuộc trò chuyện:\n';
-    for (const m of conv.messages) {
-      contextLines += (m.role === 'user' ? 'Người dùng' : 'Bot') + ': ' + m.text + '\n';
+    for (const m of recentMessages) {
+      // Truncate long messages in history to save tokens
+      const truncated = m.text.length > 300 ? m.text.slice(0, 300) + '...' : m.text;
+      contextLines += (m.role === 'user' ? 'Người dùng' : 'Bot') + ': ' + truncated + '\n';
     }
     contextLines += '---\n';
   }
@@ -239,7 +319,7 @@ async function getBotReply(userMessage, imageData, userId) {
   }
 
   try {
-    const result = await geminiModel.generateContent(parts);
+    const result = await callGeminiWithRetry(parts);
     const reply = result.response.text().slice(0, 4000);
 
     // Store in simple format (text only, no image data)
@@ -250,19 +330,19 @@ async function getBotReply(userMessage, imageData, userId) {
 
     return reply;
   } catch (err) {
-    console.error('Gemini error:', err.message, err.stack);
+    console.error('Gemini error:', err.message);
     // Reset history and try one more time without context
     conv.messages = [];
     try {
-      const result = await geminiModel.generateContent(currentText);
+      const result = await callGeminiWithRetry([{ text: currentText }]);
       const reply = result.response.text().slice(0, 4000);
       conv.messages.push({ role: 'user', text: currentText });
       conv.messages.push({ role: 'bot', text: reply });
       return reply;
     } catch (err2) {
       console.error('Gemini fallback error:', err2.message);
-      if (err2.message && err2.message.includes('429')) {
-        return '⏳ Bot đang bị giới hạn tần suất. Vui lòng thử lại sau 1 phút nhé!';
+      if (err2.message && (err2.message.includes('429') || err2.message.includes('RESOURCE_EXHAUSTED'))) {
+        return '⏳ Bot đang bận, vui lòng thử lại sau 30 giây nhé!';
       }
       return '⚠️ Bot tạm thời lỗi: ' + (err2.message || '').slice(0, 150);
     }
@@ -271,11 +351,11 @@ async function getBotReply(userMessage, imageData, userId) {
 
 // --- DEBUG: Test Gemini API ---
 app.get('/api/bot-test', async (req, res) => {
-  if (!geminiModel) return res.json({ ok: false, error: 'GEMINI_API_KEY not set' });
+  if (geminiModels.length === 0) return res.json({ ok: false, error: 'GEMINI_API_KEY not set' });
   try {
-    const result = await geminiModel.generateContent('Nói "xin chào" bằng tiếng Việt, 1 câu ngắn.');
+    const result = await callGeminiWithRetry([{ text: 'Nói "xin chào" bằng tiếng Việt, 1 câu ngắn.' }]);
     const text = result.response.text();
-    res.json({ ok: true, reply: text.slice(0, 200) });
+    res.json({ ok: true, reply: text.slice(0, 200), apiKeys: geminiModels.length });
   } catch (err) {
     res.json({ ok: false, error: err.message, code: err.code, status: err.status });
   }
@@ -617,6 +697,67 @@ app.delete('/api/nickname/:userId', requireAuth, async (req, res) => {
   res.json({ ok: true });
 });
 
+// --- PIN MESSAGE ROUTES ---
+
+app.post('/api/pin', requireAuth, async (req, res) => {
+  const { messageId, chatType, chatId } = req.body;
+  if (!messageId || !chatType || !chatId) return res.status(400).json({ error: 'Thiếu thông tin' });
+  if (!['dm', 'group'].includes(chatType)) return res.status(400).json({ error: 'chatType không hợp lệ' });
+
+  // Check if already pinned
+  const { rows: existing } = await pool.query(
+    'SELECT id FROM pinned_messages WHERE message_id = $1 AND chat_type = $2 AND chat_id = $3',
+    [messageId, chatType, chatId]
+  );
+  if (existing.length > 0) return res.status(400).json({ error: 'Tin nhắn đã được ghim' });
+
+  const { rows } = await pool.query(
+    'INSERT INTO pinned_messages (message_id, chat_type, chat_id, pinned_by) VALUES ($1, $2, $3, $4) RETURNING *',
+    [messageId, chatType, chatId, req.userId]
+  );
+  res.json(rows[0]);
+});
+
+app.delete('/api/pin/:messageId', requireAuth, async (req, res) => {
+  const messageId = parseInt(req.params.messageId);
+  await pool.query('DELETE FROM pinned_messages WHERE message_id = $1', [messageId]);
+  res.json({ ok: true });
+});
+
+app.get('/api/pins/:chatType/:chatId', requireAuth, async (req, res) => {
+  const { chatType, chatId } = req.params;
+
+  let query;
+  if (chatType === 'dm') {
+    query = `
+      SELECT pm.*, m.content, m.sender_id, m.created_at as message_created_at,
+        u.username as sender_name, u.display_name as sender_display_name,
+        pu.username as pinned_by_name
+      FROM pinned_messages pm
+      JOIN messages m ON pm.message_id = m.id
+      JOIN users u ON m.sender_id = u.id
+      JOIN users pu ON pm.pinned_by = pu.id
+      WHERE pm.chat_type = $1 AND pm.chat_id = $2
+      ORDER BY pm.created_at DESC
+    `;
+  } else {
+    query = `
+      SELECT pm.*, gm.content, gm.sender_id, gm.created_at as message_created_at,
+        u.username as sender_name, u.display_name as sender_display_name,
+        pu.username as pinned_by_name
+      FROM pinned_messages pm
+      JOIN group_messages gm ON pm.message_id = gm.id
+      JOIN users u ON gm.sender_id = u.id
+      JOIN users pu ON pm.pinned_by = pu.id
+      WHERE pm.chat_type = $1 AND pm.chat_id = $2
+      ORDER BY pm.created_at DESC
+    `;
+  }
+
+  const { rows } = await pool.query(query, [chatType, chatId]);
+  res.json(rows);
+});
+
 // --- GROUP CHAT ROUTES ---
 
 app.post('/api/groups', requireAuth, async (req, res) => {
@@ -846,6 +987,7 @@ io.on('connection', async (socket) => {
 
   function broadcastOnline() {
     io.emit('online_users', Array.from(onlineUsers.keys()));
+    io.emit('online_count', onlineUsers.size);
   }
   broadcastOnline();
 
