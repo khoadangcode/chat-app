@@ -235,7 +235,15 @@ async function waitForKey(keyIndex) {
 }
 
 // --- RETRY WITH BACKOFF (try ALL keys before waiting) ---
-async function callGeminiWithRetry(parts, maxRounds = 3) {
+// Track which keys are temporarily blocked (cooldown after 429)
+const keyCooldownUntil = new Map(); // keyIndex -> timestamp
+
+function isRetryableError(err) {
+  if (!err || !err.message) return false;
+  return err.message.includes('429') || err.message.includes('RESOURCE_EXHAUSTED') || err.message.includes('503');
+}
+
+async function callGeminiWithRetry(parts, maxRounds = 4) {
   if (geminiModels.length === 0) throw new Error('No API keys configured');
   let lastError;
 
@@ -245,32 +253,38 @@ async function callGeminiWithRetry(parts, maxRounds = 3) {
       const keyIndex = (currentModelIndex + i) % geminiModels.length;
       const model = geminiModels[keyIndex];
 
+      // Skip keys that are in cooldown
+      const cooldown = keyCooldownUntil.get(keyIndex) || 0;
+      if (Date.now() < cooldown) {
+        console.log(`Key ${keyIndex + 1} still in cooldown, skipping...`);
+        continue;
+      }
+
       await waitForKey(keyIndex);
 
       try {
         const result = await model.generateContent(parts);
-        // Success — advance the round-robin pointer past this key
         currentModelIndex = (keyIndex + 1) % geminiModels.length;
         return result;
       } catch (err) {
         lastError = err;
-        const is429 = err.message && (err.message.includes('429') || err.message.includes('RESOURCE_EXHAUSTED'));
-        const isOverloaded = err.message && err.message.includes('503');
-
-        if (is429 || isOverloaded) {
-          console.log(`Key ${keyIndex + 1}/${geminiModels.length} rate limited, trying next...`);
-          continue; // try next key immediately
+        if (isRetryableError(err)) {
+          // Put this key on cooldown for 15 seconds
+          keyCooldownUntil.set(keyIndex, Date.now() + 15000);
+          console.log(`Key ${keyIndex + 1}/${geminiModels.length} rate limited, cooldown 15s`);
+          continue;
         }
-        // Non-retryable error
         throw err;
       }
     }
 
     // All keys failed this round — wait before next round
     if (round < maxRounds - 1) {
-      const delay = Math.min(8000 * Math.pow(2, round), 30000); // 8s, 16s
-      console.log(`All keys rate limited (round ${round + 1}/${maxRounds}), waiting ${delay}ms...`);
+      const delay = Math.min(10000 * (round + 1), 30000); // 10s, 20s, 30s
+      console.log(`All keys rate limited (round ${round + 1}/${maxRounds}), waiting ${delay / 1000}s...`);
       await new Promise(r => setTimeout(r, delay));
+      // Clear cooldowns for next round retry
+      keyCooldownUntil.clear();
     }
   }
   throw lastError;
@@ -310,14 +324,13 @@ async function getBotReply(userMessage, imageData, userId) {
   if (Date.now() - conv.lastActivity > BOT_HISTORY_TIMEOUT) conv.messages = [];
   conv.lastActivity = Date.now();
 
-  // Build context from history — keep only last 10 messages to save tokens
+  // Build context from history — keep only last 6 messages to save tokens
   let contextLines = '';
-  const recentMessages = conv.messages.slice(-10);
+  const recentMessages = conv.messages.slice(-6);
   if (recentMessages.length > 0) {
     contextLines = 'Lịch sử cuộc trò chuyện:\n';
     for (const m of recentMessages) {
-      // Truncate long messages in history to save tokens
-      const truncated = m.text.length > 300 ? m.text.slice(0, 300) + '...' : m.text;
+      const truncated = m.text.length > 200 ? m.text.slice(0, 200) + '...' : m.text;
       contextLines += (m.role === 'user' ? 'Người dùng' : 'Bot') + ': ' + truncated + '\n';
     }
     contextLines += '---\n';
@@ -336,7 +349,6 @@ async function getBotReply(userMessage, imageData, userId) {
     const result = await callGeminiWithRetry(parts);
     const reply = result.response.text().slice(0, 4000);
 
-    // Store in simple format (text only, no image data)
     const userText = imageData ? currentText + ' [kèm hình ảnh]' : currentText;
     conv.messages.push({ role: 'user', text: userText });
     conv.messages.push({ role: 'bot', text: reply });
@@ -344,35 +356,35 @@ async function getBotReply(userMessage, imageData, userId) {
 
     return reply;
   } catch (err) {
-    console.error('Gemini error:', err.message);
-    // Reset history and try one more time without context
-    conv.messages = [];
-    try {
-      const result = await callGeminiWithRetry([{ text: currentText }]);
-      const reply = result.response.text().slice(0, 4000);
-      conv.messages.push({ role: 'user', text: currentText });
-      conv.messages.push({ role: 'bot', text: reply });
-      return reply;
-    } catch (err2) {
-      console.error('Gemini fallback error:', err2.message);
-      if (err2.message && (err2.message.includes('429') || err2.message.includes('RESOURCE_EXHAUSTED'))) {
-        return '⏳ Bot đang bận, vui lòng thử lại sau 30 giây nhé!';
-      }
-      return '⚠️ Bot tạm thời lỗi: ' + (err2.message || '').slice(0, 150);
+    console.error('Gemini final error:', err.message);
+    if (isRetryableError(err)) {
+      return '⏳ Tất cả API key đều đang bị giới hạn. Bot sẽ tự phục hồi trong vài giây, hãy thử lại nhé!';
     }
+    return '⚠️ Bot lỗi: ' + (err.message || '').slice(0, 150);
   }
 }
 
-// --- DEBUG: Test Gemini API ---
+// --- DEBUG: Test Gemini API (test each key individually) ---
 app.get('/api/bot-test', async (req, res) => {
-  if (geminiModels.length === 0) return res.json({ ok: false, error: 'GEMINI_API_KEY not set' });
-  try {
-    const result = await callGeminiWithRetry([{ text: 'Nói "xin chào" bằng tiếng Việt, 1 câu ngắn.' }]);
-    const text = result.response.text();
-    res.json({ ok: true, reply: text.slice(0, 200), apiKeys: geminiModels.length });
-  } catch (err) {
-    res.json({ ok: false, error: err.message, code: err.code, status: err.status });
+  if (geminiModels.length === 0) return res.json({ ok: false, error: 'No API keys configured' });
+
+  const results = [];
+  for (let i = 0; i < geminiModels.length; i++) {
+    try {
+      const result = await geminiModels[i].generateContent('Nói "xin chào" bằng tiếng Việt, 1 câu ngắn.');
+      const text = result.response.text();
+      results.push({ key: i + 1, ok: true, reply: text.slice(0, 100) });
+    } catch (err) {
+      results.push({ key: i + 1, ok: false, error: err.message.slice(0, 200) });
+    }
   }
+
+  res.json({
+    totalKeys: geminiModels.length,
+    model: GEMINI_MODEL,
+    results,
+    workingKeys: results.filter(r => r.ok).length
+  });
 });
 
 // --- SESSION & MIDDLEWARE ---
