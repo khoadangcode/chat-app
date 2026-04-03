@@ -23,7 +23,7 @@
         </svg>
       </div>
       <h1>Chat App</h1>
-      <p class="subtitle">Nhắn tin real-time</p>
+      <p class="subtitle">Built by DangKhoa</p>
 
       <div class="tabs">
         <button class="tab active" data-tab="login">Đăng nhập</button>
@@ -287,6 +287,13 @@
   <script>
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.register('/sw.js').catch(() => {});
+    }
+  </script>
+  <script>
+    // Livereload - auto refresh when files change
+    if (location.hostname === 'localhost' || location.hostname === '127.0.0.1') {
+      const es = new EventSource('/__livereload');
+      es.onmessage = () => location.reload();
     }
   </script>
 </body>

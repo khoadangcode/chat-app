@@ -1,3 +1,4 @@
+require('dotenv').config();
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -6,6 +7,7 @@ const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const { Pool } = require('pg');
 const path = require('path');
+const fs = require('fs');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 const app = express();
@@ -1292,6 +1294,34 @@ io.on('connection', async (socket) => {
     broadcastOnline();
   });
 });
+
+// --- LIVERELOAD (dev only) ---
+if (!process.env.NODE_ENV || process.env.NODE_ENV === 'development') {
+  const liveReloadClients = [];
+
+  app.get('/__livereload', (req, res) => {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders();
+    liveReloadClients.push(res);
+    req.on('close', () => {
+      const i = liveReloadClients.indexOf(res);
+      if (i !== -1) liveReloadClients.splice(i, 1);
+    });
+  });
+
+  const publicDir = path.join(__dirname, 'public');
+  let debounce = null;
+  fs.watch(publicDir, { recursive: true }, () => {
+    clearTimeout(debounce);
+    debounce = setTimeout(() => {
+      liveReloadClients.forEach(client => client.write('data: reload\n\n'));
+    }, 300);
+  });
+
+  console.log('🔄 Livereload enabled — browser will auto-refresh on file changes');
+}
 
 // --- START ---
 const PORT = process.env.PORT || 3000;

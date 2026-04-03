@@ -8,15 +8,15 @@
   --primary: #5b5ea6;
   --primary-light: #7c7fbf;
   --primary-dark: #45477d;
-  --bg: #f0f2f5;
-  --sidebar-bg: #ffffff;
-  --chat-bg: #e8ecf1;
-  --white: #ffffff;
-  --text: #1a1a2e;
-  --text-light: #6b7280;
-  --border: #e2e5e9;
+  --bg: #d9d5cc;
+  --sidebar-bg: #e3dfd7;
+  --chat-bg: #cfc9bf;
+  --white: #e8e4dc;
+  --text: #2d2d2d;
+  --text-light: #5e5e5e;
+  --border: #c4bfb5;
   --sent: #5b5ea6;
-  --received: #ffffff;
+  --received: #e3dfd7;
   --online: #22c55e;
   --danger: #ef4444;
 }
@@ -26,15 +26,15 @@
   --primary: #7c7fbf;
   --primary-light: #9b9ed4;
   --primary-dark: #5b5ea6;
-  --bg: #1a1a2e;
-  --sidebar-bg: #16213e;
-  --chat-bg: #0f3460;
-  --white: #1e293b;
+  --bg: #000000;
+  --sidebar-bg: #0a0a0a;
+  --chat-bg: #050505;
+  --white: #111111;
   --text: #e2e8f0;
   --text-light: #94a3b8;
-  --border: #334155;
+  --border: #1a1a1a;
   --sent: #5b5ea6;
-  --received: #1e293b;
+  --received: #111111;
   --online: #22c55e;
   --danger: #ef4444;
 }
@@ -59,11 +59,67 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: linear-gradient(135deg, #5b5ea6 0%, #3d85c6 50%, #81b29a 100%);
+  background: linear-gradient(135deg, #0f0c29 0%, #302b63 40%, #24243e 100%);
+  position: relative;
+  overflow: hidden;
+}
+
+.screen::before {
+  content: '';
+  position: absolute;
+  top: -50%;
+  left: -50%;
+  width: 200%;
+  height: 200%;
+  background:
+    radial-gradient(circle at 20% 50%, rgba(120, 80, 255, 0.4) 0%, transparent 50%),
+    radial-gradient(circle at 80% 20%, rgba(255, 100, 180, 0.3) 0%, transparent 50%),
+    radial-gradient(circle at 50% 80%, rgba(60, 200, 255, 0.3) 0%, transparent 50%),
+    radial-gradient(circle at 70% 60%, rgba(100, 255, 180, 0.2) 0%, transparent 40%);
+  animation: auroraMove 12s ease-in-out infinite;
+  z-index: 0;
+}
+
+.screen::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background:
+    radial-gradient(2px 2px at 10% 20%, rgba(255,255,255,0.6), transparent),
+    radial-gradient(2px 2px at 30% 70%, rgba(255,255,255,0.5), transparent),
+    radial-gradient(2px 2px at 50% 40%, rgba(255,255,255,0.4), transparent),
+    radial-gradient(2px 2px at 70% 10%, rgba(255,255,255,0.6), transparent),
+    radial-gradient(2px 2px at 90% 60%, rgba(255,255,255,0.5), transparent),
+    radial-gradient(2px 2px at 15% 85%, rgba(255,255,255,0.3), transparent),
+    radial-gradient(2px 2px at 85% 90%, rgba(255,255,255,0.4), transparent),
+    radial-gradient(3px 3px at 40% 55%, rgba(255,255,255,0.7), transparent),
+    radial-gradient(2px 2px at 60% 30%, rgba(255,255,255,0.5), transparent);
+  animation: twinkle 4s ease-in-out infinite alternate;
+  z-index: 0;
+}
+
+.screen > * {
+  position: relative;
+  z-index: 1;
+}
+
+@keyframes auroraMove {
+  0% { transform: translate(0, 0) rotate(0deg); }
+  33% { transform: translate(2%, -2%) rotate(3deg); }
+  66% { transform: translate(-1%, 1%) rotate(-2deg); }
+  100% { transform: translate(0, 0) rotate(0deg); }
+}
+
+@keyframes twinkle {
+  0% { opacity: 0.5; }
+  100% { opacity: 1; }
 }
 
 [data-theme="dark"] .screen {
-  background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+  background: linear-gradient(135deg, #0a0a1a 0%, #1a1040 40%, #0d0d2b 100%);
 }
 
 @keyframes float {
@@ -73,13 +129,14 @@ body {
 
 /* ---- AUTH ---- */
 .auth-container {
-  background: var(--white);
+  background: rgba(255, 255, 255, 0.08);
   padding: 40px;
   border-radius: 16px;
-  box-shadow: 0 4px 24px rgba(0,0,0,0.08);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
   width: 380px;
   text-align: center;
-  backdrop-filter: blur(10px);
+  backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.15);
   animation: authSlideIn 0.5s ease-out;
 }
 
@@ -89,17 +146,22 @@ body {
 }
 
 [data-theme="dark"] .auth-container {
-  box-shadow: 0 4px 24px rgba(0,0,0,0.3);
+  background: rgba(255, 255, 255, 0.05);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+}
+
+.auth-logo {
+  color: rgba(255, 255, 255, 0.7);
 }
 
 .auth-container h1 {
   font-size: 28px;
-  color: var(--primary);
+  color: #e0d0ff;
   margin-bottom: 4px;
 }
 
 .subtitle {
-  color: var(--text-light);
+  color: rgba(255, 255, 255, 0.55);
   margin-bottom: 24px;
   font-size: 14px;
 }
@@ -108,7 +170,7 @@ body {
   display: flex;
   gap: 0;
   margin-bottom: 24px;
-  background: var(--bg);
+  background: rgba(255, 255, 255, 0.06);
   border-radius: 10px;
   padding: 4px;
 }
@@ -122,14 +184,14 @@ body {
   font-size: 14px;
   font-weight: 500;
   border-radius: 8px;
-  color: var(--text-light);
+  color: rgba(255, 255, 255, 0.5);
   transition: all 0.2s;
 }
 
 .tab.active {
-  background: var(--white);
-  color: var(--primary);
-  box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+  background: rgba(255, 255, 255, 0.12);
+  color: #e0d0ff;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.2);
 }
 
 .auth-form {
@@ -140,13 +202,17 @@ body {
 
 .auth-form input {
   padding: 12px 16px;
-  border: 1.5px solid var(--border);
+  border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 10px;
   font-size: 14px;
   outline: none;
   transition: border-color 0.2s;
-  background: var(--bg);
-  color: var(--text);
+  background: rgba(255, 255, 255, 0.06);
+  color: #fff;
+}
+
+.auth-form input::placeholder {
+  color: rgba(255, 255, 255, 0.35);
 }
 
 [data-theme="dark"] .auth-form input {
@@ -210,11 +276,14 @@ body {
 }
 
 .sidebar-header {
-  padding: 16px 20px;
+  padding: 12px 12px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+  gap: 8px;
+  overflow: hidden;
 }
 
 .current-user {
@@ -223,13 +292,16 @@ body {
   gap: 10px;
   font-weight: 600;
   font-size: 15px;
+  min-width: 0;
 }
 
 .sidebar-header-actions {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 2px;
   position: relative;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .icon-btn {
@@ -237,11 +309,12 @@ body {
   border: none;
   cursor: pointer;
   color: var(--text-light);
-  padding: 6px;
+  padding: 5px;
   border-radius: 8px;
   transition: all 0.2s;
   display: flex;
   align-items: center;
+  flex-shrink: 0;
 }
 
 .icon-btn:hover {
@@ -314,7 +387,7 @@ body {
   margin-bottom: 6px;
 }
 
-[data-theme="dark"] .blocked-user-item { background: #1e293b; }
+[data-theme="dark"] .blocked-user-item { background: #111111; }
 
 .blocked-user-name { font-size: 13px; font-weight: 500; }
 
@@ -438,6 +511,18 @@ body {
   color: white;
   position: relative;
   box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+}
+
+.bot-avatar {
+  background: linear-gradient(135deg, #7c3aed, #2563eb, #06b6d4) !important;
+  background-size: 200% 200% !important;
+  animation: botGlow 3s ease-in-out infinite;
+  box-shadow: 0 0 12px rgba(124, 58, 237, 0.4) !important;
+}
+
+@keyframes botGlow {
+  0%, 100% { background-position: 0% 50%; box-shadow: 0 0 12px rgba(124, 58, 237, 0.4); }
+  50% { background-position: 100% 50%; box-shadow: 0 0 18px rgba(37, 99, 235, 0.5); }
 }
 
 .user-avatar.online::after {
@@ -756,7 +841,7 @@ body {
   animation: fadeIn 0.2s ease;
 }
 
-[data-theme="dark"] .admin-panel { background: #1a1a2e; }
+[data-theme="dark"] .admin-panel { background: #0a0a0a; }
 
 .admin-panel-header {
   display: flex;
@@ -770,7 +855,7 @@ body {
   z-index: 10;
 }
 
-[data-theme="dark"] .admin-panel-header { background: #1a1a2e; }
+[data-theme="dark"] .admin-panel-header { background: #0a0a0a; }
 
 .admin-panel-header h2 { font-size: 20px; font-weight: 700; color: var(--text); }
 
@@ -826,7 +911,7 @@ body {
 
 .admin-table tbody tr:hover { background: #f8f9fb; }
 .admin-table tbody tr:last-child td { border-bottom: none; }
-[data-theme="dark"] .admin-table tbody tr:hover { background: #1e293b; }
+[data-theme="dark"] .admin-table tbody tr:hover { background: #111111; }
 
 .admin-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 
@@ -886,7 +971,7 @@ body {
   overflow: hidden;
 }
 
-[data-theme="dark"] .emoji-picker { background: #16213e; box-shadow: 0 4px 24px rgba(0,0,0,0.4); }
+[data-theme="dark"] .emoji-picker { background: #0a0a0a; box-shadow: 0 4px 24px rgba(0,0,0,0.6); }
 
 .emoji-picker-tabs { display: flex; border-bottom: 1px solid var(--border); }
 

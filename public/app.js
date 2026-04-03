@@ -168,10 +168,13 @@ function getColor(name) {
   return COLORS[Math.abs(hash) % COLORS.length];
 }
 
-function createAvatar(name, isOnline, avatarUrl) {
+function createAvatar(name, isOnline, avatarUrl, role) {
   const el = document.createElement('span');
   el.className = 'user-avatar' + (isOnline ? ' online' : '');
-  if (avatarUrl) {
+  if (role === 'bot') {
+    el.classList.add('bot-avatar');
+    el.innerHTML = '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="white" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="10" rx="2"/><circle cx="8.5" cy="16" r="1.5"/><circle cx="15.5" cy="16" r="1.5"/><path d="M12 3v4"/><circle cx="12" cy="3" r="1"/><path d="M3 15h-1"/><path d="M22 15h-1"/></svg>';
+  } else if (avatarUrl) {
     el.style.backgroundImage = `url(${avatarUrl})`;
     el.style.backgroundSize = 'cover';
     el.style.backgroundPosition = 'center';
@@ -695,7 +698,7 @@ function renderUserList(users) {
     item.dataset.userId = user.id;
     item.dataset.username = user.username;
 
-    const avatar = createAvatar(user.username, isOnline, user.avatar);
+    const avatar = createAvatar(user.username, isOnline, user.avatar, user.role);
     const info = document.createElement('div');
     info.className = 'user-item-info';
 
